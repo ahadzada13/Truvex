@@ -16,6 +16,7 @@ import requests
 
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_file, redirect, url_for, jsonify
+from markupsafe import Markup, escape as h_escape
 from dotenv import load_dotenv
 from io import BytesIO, StringIO
 import csv
@@ -26,6 +27,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 
 # ============================================================
@@ -51,6 +54,526 @@ URLHAUS_AUTH_KEY = os.getenv("URLHAUS_AUTH_KEY", "").strip()
 PHISHTANK_APP_KEY = os.getenv("PHISHTANK_APP_KEY", "").strip()
 
 OPENPHISH_FEED_URL = "https://openphish.com/feed.txt"
+
+
+# ============================================================
+# VIVID THEME (shared CSS)
+# ============================================================
+APP_CSS = """
+:root{
+  --bg:#0b0418; --panel:#150a33; --panel2:#1f1050; --panel3:#0f0726;
+  --border:#4a2f9e; --text:#fbfaff; --muted:#b3a6ea; --dim:#8577c9;
+  --cyan:#00e5ff; --blue:#2f8cff; --violet:#a259ff; --pink:#ff2bd6;
+  --crit:#ff2d55; --high:#ff7a00; --med:#ffd60a; --low:#19d3ff; --ok:#00ff9d;
+  --grad:linear-gradient(135deg,#00c6ff 0%,#7b3fff 55%,#ff2bd6 100%);
+  --grad-soft:linear-gradient(135deg,rgba(0,198,255,.16),rgba(123,63,255,.16) 55%,rgba(255,43,214,.16));
+}
+*{box-sizing:border-box}
+body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;color:var(--text);margin:0;padding:30px;
+  background:radial-gradient(900px 500px at 8% -5%,rgba(0,229,255,.22),transparent 60%),
+             radial-gradient(800px 500px at 100% 0%,rgba(255,43,214,.22),transparent 60%),
+             radial-gradient(900px 600px at 50% 110%,rgba(162,89,255,.25),transparent 60%),var(--bg);
+  background-attachment:fixed;min-height:100vh}
+.container{max-width:1040px;width:100%;margin:0 auto;background:rgba(21,10,51,.92);padding:40px;border-radius:18px;
+  box-shadow:0 20px 50px rgba(0,0,0,.65),0 0 0 1px var(--border),0 0 40px rgba(123,63,255,.25)}
+.top-bar{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px}
+.logo-area{display:flex;align-items:center;gap:12px}
+.logo-area>span{font-size:30px;filter:drop-shadow(0 0 10px var(--cyan))}
+h2{margin:0;font-size:26px;letter-spacing:1.5px;font-weight:800;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.subtitle{color:var(--muted);font-size:12px;margin-bottom:25px;text-transform:uppercase;letter-spacing:2px;font-weight:600}
+.tabs{display:flex;justify-content:center;gap:12px;margin-bottom:25px;flex-wrap:wrap}
+.tab-btn{background:var(--panel2);color:var(--muted);border:1px solid var(--border);padding:10px 22px;border-radius:10px;cursor:pointer;font-weight:700;transition:all .15s}
+.tab-btn:hover{color:#fff;border-color:var(--cyan)}
+.tab-btn.active{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 0 20px rgba(123,63,255,.6)}
+.section-box{display:none;border:2px dashed var(--violet);padding:30px;text-align:center;border-radius:14px;background:var(--grad-soft)}
+.section-box.active{display:block}
+input[type="text"]{color:var(--text);margin-bottom:15px;padding:12px;width:75%;max-width:100%;background:var(--panel3);border:1px solid var(--border);border-radius:8px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(0,229,255,.25)}
+button[type="submit"]{padding:12px 26px;background:var(--grad);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:800;font-size:14px;box-shadow:0 6px 20px rgba(123,63,255,.5);transition:transform .12s}
+button[type="submit"]:hover{transform:translateY(-2px)}
+.results{margin-top:30px;background:var(--panel3);padding:30px;border-radius:14px;border:1px solid var(--border);text-align:left}
+.results h3{margin-top:0}
+.accent{color:var(--cyan);text-shadow:0 0 12px rgba(0,229,255,.5)}
+.violet{color:#d0a4ff;font-weight:700}
+.risk{font-weight:850;padding:4px 12px;border-radius:6px;border:1px solid}
+.risk-critical{color:var(--crit);background:rgba(255,45,85,.14);border-color:rgba(255,45,85,.55)}
+.risk-high{color:var(--high);background:rgba(255,122,0,.14);border-color:rgba(255,122,0,.55)}
+.risk-medium{color:var(--med);background:rgba(255,214,10,.12);border-color:rgba(255,214,10,.5)}
+.risk-low{color:var(--low);background:rgba(25,211,255,.12);border-color:rgba(25,211,255,.5)}
+.risk-clean{color:var(--ok);background:rgba(0,255,157,.12);border-color:rgba(0,255,157,.5)}
+.incident-badge{background:linear-gradient(135deg,#2a0f6b,#4b0f7a);border:1px solid var(--violet);padding:14px 18px;border-radius:10px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;box-shadow:0 0 22px rgba(162,89,255,.4)}
+.incident-badge .lbl{font-size:11px;color:#e0c8ff;text-transform:uppercase;font-weight:800;letter-spacing:1px}
+.incident-badge .id{font-size:16px;color:#fff;font-weight:800;margin-top:3px}
+.sev-pill{font-size:11px;margin-left:8px;padding:3px 8px;border-radius:5px;background:rgba(255,45,85,.25);color:#ff7d95;border:1px solid rgba(255,45,85,.5)}
+.mitre-box{background:linear-gradient(135deg,rgba(162,89,255,.2),rgba(255,43,214,.12));border:1px solid var(--violet);padding:16px;border-radius:10px;margin-top:20px}
+.mitre-box h4{margin:0 0 8px;color:#e0b8ff}
+.mitre-id{background:var(--grad);color:#fff;padding:3px 9px;border-radius:5px;font-weight:800;font-size:12px}
+.decay-box{background:var(--panel2);border:1px solid var(--border);padding:16px;border-radius:10px;margin-top:20px}
+.decay-box h4{margin:0 0 8px;color:var(--cyan)}
+.info-box{margin-top:20px;padding:14px;background:var(--panel2);border:1px solid var(--border);border-radius:10px;color:var(--muted);font-size:12px}
+.evidence-box{margin-top:20px;padding:16px;background:rgba(255,214,10,.06);border:1px solid rgba(255,214,10,.4);border-radius:10px}
+.evidence-box h4{margin:0;color:var(--med)}
+.evidence-box ul{color:var(--text);font-size:12px;line-height:1.8}
+.tag{display:inline-block;background:linear-gradient(135deg,#00b7ff,#7b3fff);color:#fff;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;margin:2px 4px 2px 0}
+.cti-title{color:#d0a4ff;margin:25px 0 10px}
+.cti-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:10px}
+.cti-card{background:var(--panel2);border:1px solid var(--border);border-top:3px solid var(--violet);padding:14px;border-radius:10px;font-size:13px}
+.cti-card small{color:var(--muted)}
+.st-bad{color:var(--crit);font-weight:800}.st-warn{color:var(--med);font-weight:800}.st-ok{color:var(--ok);font-weight:800}.st-na{color:var(--muted);font-weight:700}
+.ai-report{background:linear-gradient(135deg,rgba(47,140,255,.16),rgba(162,89,255,.2));border:1px solid var(--blue);padding:22px;border-radius:12px;margin-top:25px;color:#eef0ff;line-height:1.7}
+.ai-report h4{margin-top:0;color:#7fc4ff}
+.ai-report code{background:rgba(0,0,0,.4);color:var(--cyan);padding:1px 5px;border-radius:4px;word-break:break-all}
+.feed-section{margin-top:35px;background:var(--panel3);border:1px solid var(--border);padding:20px;border-radius:14px}
+.feed-section h4{margin:0 0 15px;color:var(--cyan);font-size:14px;text-transform:uppercase}
+.feed-item{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:9px 12px;border-bottom:1px solid var(--panel2);font-size:12px;color:var(--muted)}
+.feed-item:hover{background:var(--grad-soft)}
+.feed-main{display:flex;justify-content:space-between;gap:12px;align-items:center;flex:1}
+.feed-main b.t{color:var(--text);word-break:break-all}
+.feed-actions{display:flex;gap:6px;align-items:center}.feed-actions form{margin:0}
+.score-critical{color:var(--crit)}.score-high{color:var(--high)}.score-medium{color:var(--med)}.score-low{color:var(--low)}.score-clean{color:var(--ok)}
+.footer{text-align:center;margin-top:40px;color:var(--dim);font-size:12px}
+.muted{color:var(--dim);font-size:11px}
+.dashboard-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:18px 0}
+.stat-card{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px;position:relative;overflow:hidden}
+.stat-card:before{content:"";position:absolute;left:0;top:0;right:0;height:3px;background:var(--grad)}
+.stat-card:nth-child(2):before{background:var(--crit)}.stat-card:nth-child(3):before{background:var(--high)}
+.stat-card:nth-child(4):before{background:var(--med)}.stat-card:nth-child(5):before{background:var(--ok)}.stat-card:nth-child(6):before{background:var(--cyan)}
+.stat-card span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;font-weight:700}
+.stat-card strong{display:block;color:#fff;font-size:26px;margin:6px 0}
+.stat-card small{color:var(--dim);font-size:10px}
+.analytics-box{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:15px}
+.analytics-col,.filter-box{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:14px}
+.analytics-col h4{margin:0 0 10px;color:var(--pink);font-size:11px;text-transform:uppercase;letter-spacing:1px}
+.mini-bars div,.type-line{display:flex;justify-content:space-between;gap:8px;padding:5px 0;color:var(--muted);font-size:11px;border-bottom:1px solid var(--panel3)}
+.mini-bars b,.type-line b{color:#fff}
+.mini-bars .c-critical b{color:var(--crit)}.mini-bars .c-high b{color:var(--high)}.mini-bars .c-medium b{color:var(--med)}.mini-bars .c-low b{color:var(--low)}.mini-bars .c-clean b{color:var(--ok)}
+.filter-box{margin-bottom:15px}
+.filter-form{display:flex;gap:8px;flex-wrap:wrap}
+.filter-form input,.filter-form select{background:var(--panel3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px;font-size:11px;margin:0}
+.filter-form input[type="text"]{width:auto;flex:1;min-width:180px}
+.filter-form button{padding:8px 14px!important;font-size:11px!important}
+.clear-btn,.action-btn,.delete-btn{border:1px solid var(--border);background:var(--panel2);color:var(--text);border-radius:8px;padding:7px 11px;text-decoration:none;font-size:10px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center}
+.clear-btn:hover,.action-btn:hover{border-color:var(--cyan);color:var(--cyan)}
+.delete-btn{border-color:rgba(255,45,85,.6);color:#ff7d95}.delete-btn:hover{background:var(--crit);color:#fff}
+/* inner pages */
+.page{max-width:1100px;margin:0 auto}
+.ibox{background:rgba(21,10,51,.92);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:15px}
+.ibox h3{margin-top:0;color:var(--cyan)}
+.igrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.icard{background:var(--panel3);border:1px solid var(--border);border-radius:10px;padding:12px}
+.ilabel{color:var(--muted);font-size:10px;text-transform:uppercase;font-weight:700}
+.ivalue{color:var(--text);margin-top:5px;word-break:break-word}
+.ivalue.critical{color:var(--crit)}.ivalue.high{color:var(--high)}.ivalue.medium{color:var(--med)}.ivalue.low{color:var(--low)}.ivalue.clean{color:var(--ok)}
+.back{color:var(--cyan);text-decoration:none;font-weight:700}
+.ctitable{width:100%;border-collapse:collapse}
+.ctitable th,.ctitable td{border-bottom:1px solid var(--panel2);padding:9px;text-align:left;font-size:12px}
+.ctitable th{color:var(--pink)}
+.notes{width:100%;min-height:140px;background:var(--panel3);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px}
+.btn{display:inline-block;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 14px;cursor:pointer;text-decoration:none;font-weight:700;font-size:12px}
+.btn:hover{border-color:var(--cyan)}
+.btn.blue{background:var(--grad);border-color:transparent;color:#fff}
+.engine-row{display:flex;justify-content:space-between;background:rgba(21,10,51,.92);border:1px solid var(--border);border-radius:12px;padding:16px;margin:8px 0}
+.engine-row .ok{color:var(--ok);font-weight:800}.engine-row .off{color:var(--med);font-weight:800}
+@media(max-width:900px){body{padding:12px}.container{padding:20px}.dashboard-grid{grid-template-columns:repeat(3,1fr)}.analytics-box,.cti-grid,.igrid{grid-template-columns:1fr}.feed-item{flex-direction:column;align-items:stretch}.feed-main{flex-direction:column;align-items:flex-start}}
+"""
+
+
+
+# ============================================================
+# I18N  (English / Azərbaycan dili)
+# ============================================================
+# Dinamik mətnlər (engine detalları, sübutlar, AI hesabatı və s.) DB-də
+# dil-neytral açar kimi (M(...)) saxlanılır və göstərilən zaman seçilmiş
+# dildə render olunur. Buna görə dili dəyişəndə KEÇMİŞ skanlar da
+# yeni dildə görünür.
+
+LANGS = ("en", "az")
+DEFAULT_LANG = "az"
+LANG_COOKIE = "truvex_lang"
+
+S = {
+    # ---------- Main UI ----------
+    "page_title": ("Truvex v16.0 | CTI Platform", "Truvex v16.0 | CTI Platforması"),
+    "app_title": ("TRUVEX CORE - CTI PLATFORM", "TRUVEX CORE - CTI PLATFORMASI"),
+    "subtitle": ("Multi-Source Threat Intelligence & IOC Analysis", "Çoxmənbəli Təhdid Kəşfiyyatı və IOC Analizi"),
+    "tab_file": ("📁 File Analysis", "📁 Fayl Analizi"),
+    "tab_domain": ("🌐 URL / Domain / IP / Hash", "🌐 URL / Domen / IP / Hash"),
+    "st_total": ("Total Scans", "Ümumi Skanlar"),
+    "st_total_sub": ("All telemetry records", "Bütün telemetriya qeydləri"),
+    "st_critical": ("Critical", "Kritik"),
+    "st_critical_sub": ("TTI ≥ 75", "TTI ≥ 75"),
+    "st_high": ("High", "Yüksək"),
+    "st_high_sub": ("TTI 50–74", "TTI 50–74"),
+    "st_avg": ("Average TTI", "Orta TTI"),
+    "st_avg_sub": ("Across all scans", "Bütün skanlar üzrə"),
+    "st_24h": ("Last 24h", "Son 24 saat"),
+    "st_7d": ("Last 7d", "Son 7 gün"),
+    "st_new": ("New telemetry", "Yeni telemetriya"),
+    "sev_dist": ("Severity Distribution", "Ciddilik Bölgüsü"),
+    "ind_types": ("Indicator Types", "İndikator Tipləri"),
+    "top_tags": ("Top Tags", "Ən Çox Teqlər"),
+    "no_data": ("No data", "Məlumat yoxdur"),
+    "search_ph": ("Search IOC, incident ID or tag", "IOC, insident ID və ya teq axtarın"),
+    "all": ("ALL", "HAMISI"),
+    "filter_btn": ("🔎 Filter", "🔎 Filtrlə"),
+    "clear_btn": ("Clear", "Təmizlə"),
+    "file_btn": ("Analyze File by Hash", "Faylı Hash ilə Analiz Et"),
+    "domain_ph": ("Enter a URL, domain, IP or MD5/SHA1/SHA256 hash", "URL, domen, IP və ya MD5/SHA1/SHA256 hash daxil edin"),
+    "domain_btn": ("Start CTI Analysis", "CTI Analizini Başlat"),
+    "incident_gen": ("Automatic Incident Ticket Generator", "Avtomatik İnsident Bilet Generatoru"),
+    "severity": ("SEVERITY:", "CİDDİLİK:"),
+    "report_title": ("📊 Truvex Threat Intelligence Report:", "📊 Truvex Threat Intelligence Hesabatı:"),
+    "ind_type": ("Indicator Type:", "İndikator Tipi:"),
+    "server_geo": ("Server IP & Geo-Location:", "Server IP və Geolokasiya:"),
+    "rdns": ("Reverse DNS:", "Reverse DNS:"),
+    "domain_age": ("Domain Age:", "Domen Yaşı:"),
+    "ssl": ("SSL:", "SSL:"),
+    "tti_label": ("Truvex Threat Index (TTI):", "Truvex Təhdid İndeksi (TTI):"),
+    "decay_title": ("📈 Trust-Decay Trajectory", "📈 Etibar-Azalma Trayektoriyası"),
+    "trend": ("Trend:", "Trend:"),
+    "mitre_title": ("🎯 MITRE ATT&CK Mapping", "🎯 MITRE ATT&CK Uyğunlaşdırması"),
+    "tactic": ("Tactic:", "Taktika:"),
+    "no_mitre": ("No confirmed technique based on current CTI evidence.", "Mövcud CTI sübutlarına əsasən təsdiqlənmiş texnika yoxdur."),
+    "cti_consensus": ("🌐 Global CTI Engine Consensus", "🌐 Qlobal CTI Mühərrik Konsensusu"),
+    "risk_evidence": ("🔎 Risk Evidence", "🔎 Risk Sübutları"),
+    "ai_title": ("🤖 Truvex AI-Assisted Triage Prototype", "🤖 Truvex AI-Dəstəkli Triage Prototipi"),
+    "feed_title": ("📡 Live Telemetry Feed", "📡 Canlı Telemetriya Lenti"),
+    "score": ("Score:", "Skor:"),
+    "btn_incident": ("Incident", "İnsident"),
+    "btn_pdf": ("PDF", "PDF"),
+    "btn_json": ("JSON", "JSON"),
+    "btn_delete": ("Delete", "Sil"),
+    "confirm_delete": ("Delete this scan from history?", "Bu skan tarixçədən silinsin?"),
+    "no_records": ("No records.", "Qeyd yoxdur."),
+    "footer": ("Truvex CTI v16.0 • Multi-Source IOC Analysis Platform", "Truvex CTI v16.0 • Çoxmənbəli IOC Analiz Platforması"),
+    "lang_en": ("English", "English"),
+    "lang_az": ("Azərbaycan", "Azərbaycan"),
+    "lang_label": ("Language", "Dil"),
+    # ---------- Verdicts ----------
+    "v_CRITICAL": ("CRITICAL", "KRİTİK"),
+    "v_HIGH": ("HIGH", "YÜKSƏK"),
+    "v_MEDIUM": ("MEDIUM", "ORTA"),
+    "v_LOW": ("LOW", "AŞAĞI"),
+    "v_CLEAN": ("CLEAN", "TƏMİZ"),
+    # ---------- Engine statuses ----------
+    "s_MALICIOUS": ("MALICIOUS", "ZƏRƏRLİ"),
+    "s_SUSPICIOUS": ("SUSPICIOUS", "ŞÜBHƏLİ"),
+    "s_CLEAN": ("CLEAN", "TƏMİZ"),
+    "s_NOT_FOUND": ("NOT FOUND", "TAPILMADI"),
+    "s_NOT_LISTED": ("NOT LISTED", "SİYAHIDA YOXDUR"),
+    "s_NOT_CONFIGURED": ("NOT CONFIGURED", "QURULMAYIB"),
+    "s_SKIPPED": ("SKIPPED", "KEÇİLDİ"),
+    "s_ERROR": ("ERROR", "XƏTA"),
+    "s_UNKNOWN": ("UNKNOWN", "NAMƏLUM"),
+    # ---------- Indicator / scan types ----------
+    "ty_url": ("URL", "URL"),
+    "ty_domain": ("Domain", "Domen"),
+    "ty_ip": ("IP address", "IP ünvanı"),
+    "ty_hash_md5": ("MD5 hash", "MD5 hash"),
+    "ty_hash_sha1": ("SHA1 hash", "SHA1 hash"),
+    "ty_hash_sha256": ("SHA256 hash", "SHA256 hash"),
+    "ty_file": ("File", "Fayl"),
+    "ty_pure-cti": ("CTI scan", "CTI skan"),
+    "ty_fayl": ("File scan", "Fayl skanı"),
+    "ty_demo": ("Demo", "Demo"),
+    # ---------- Tags ----------
+    "tg_URL-Analysis": ("URL-Analysis", "URL-Analiz"),
+    "tg_Domain-Analysis": ("Domain-Analysis", "Domen-Analiz"),
+    "tg_IP-Analysis": ("IP-Analysis", "IP-Analiz"),
+    "tg_Hash-Analysis": ("Hash-Analysis", "Hash-Analiz"),
+    "tg_File-Analysis": ("File-Analysis", "Fayl-Analiz"),
+    "tg_High-Risk": ("High-Risk", "Yüksək-Risk"),
+    "tg_High-Risk-Malware": ("High-Risk-Malware", "Yüksək-Risk-Zərərverici"),
+    "tg_Suspicious": ("Suspicious", "Şübhəli"),
+    "tg_Suspicious-File": ("Suspicious-File", "Şübhəli-Fayl"),
+    "tg_Limited-Evidence": ("Limited-Evidence", "Məhdud-Sübut"),
+    "tg_No-Threat-Evidence": ("No-Threat-Evidence", "Təhdid-Sübutu-Yoxdur"),
+    "tg_cti_sources": ("CTI-{n}-Sources", "CTI-{n}-Mənbə"),
+    # ---------- MITRE ----------
+    "mt_T1566_name": ("Phishing", "Fişinq"),
+    "mt_T1566_tactic": ("Initial Access", "İlkin Giriş"),
+    "mt_T1566_desc": ("Adversaries may use phishing techniques to gain access to victim systems.", "Hücumçular qurban sistemlərinə giriş əldə etmək üçün fişinq texnikalarından istifadə edə bilərlər."),
+    "mt_T1105_name": ("Ingress Tool Transfer", "Alətlərin Daxil Edilməsi"),
+    "mt_T1105_tactic": ("Command and Control", "Komanda və İdarəetmə"),
+    "mt_T1105_desc": ("Adversaries may transfer files or payloads from an external system into the target network.", "Hücumçular faylları və ya zərərli yükləri xarici sistemdən hədəf şəbəkəyə köçürə bilərlər."),
+    "mt_T1204_name": ("User Execution", "İstifadəçi Tərəfindən İcra"),
+    "mt_T1204_tactic": ("Execution", "İcra"),
+    "mt_T1204_desc": ("An adversary may rely upon a user opening a malicious file or executing a payload.", "Hücumçu istifadəçinin zərərli faylı açmasına və ya zərərli yükü icra etməsinə arxalana bilər."),
+    # ---------- Trust decay ----------
+    "decay_t_rapid": ("Rapid Degrading (Severe risk increase)", "Sürətli Pisləşmə (Şiddətli risk artımı)"),
+    "decay_f_rapid": ("High-risk profile. Further investigation and monitoring are recommended.", "Yüksək riskli profil. Əlavə araşdırma və monitorinq tövsiyə olunur."),
+    "decay_t_elev": ("Elevated Risk", "Artmış Risk"),
+    "decay_f_elev": ("Threat indicators were observed. Close monitoring is recommended.", "Təhdid göstəriciləri müşahidə olunur. Yaxından izlənilməsi tövsiyə edilir."),
+    "decay_t_lim": ("Limited Evidence", "Məhdud Sübut"),
+    "decay_f_lim": ("Only limited threat intelligence evidence exists. Risk is assessed as low.", "Məhdud threat intelligence sübutu mövcuddur. Risk aşağı səviyyədə qiymətləndirilir."),
+    "decay_t_stable": ("Stable / No Evidence", "Sabit / Sübut Yoxdur"),
+    "decay_f_stable": ("No significant threat evidence was found in the available CTI sources.", "Mövcud CTI mənbələrində əhəmiyyətli təhlükə sübutu aşkar edilmədi."),
+    # ---------- Risk evidence ----------
+    "ev_vt_high": ("VirusTotal: high malicious ratio", "VirusTotal: yüksək zərərli nisbəti"),
+    "ev_vt_elev": ("VirusTotal: elevated malicious ratio", "VirusTotal: artmış zərərli nisbəti"),
+    "ev_vt_lim": ("VirusTotal: limited detections", "VirusTotal: məhdud aşkarlamalar"),
+    "ev_vt_susp": ("VirusTotal: suspicious engines", "VirusTotal: şübhəli mühərriklər"),
+    "ev_urlhaus": ("URLhaus: malicious URL", "URLhaus: zərərli URL"),
+    "ev_phish": ("PhishTank: verified phishing", "PhishTank: təsdiqlənmiş fişinq"),
+    "ev_openphish": ("OpenPhish: malicious URL", "OpenPhish: zərərli URL"),
+    "ev_abuse_vh": ("AbuseIPDB: very high confidence", "AbuseIPDB: çox yüksək əminlik"),
+    "ev_abuse_h": ("AbuseIPDB: high confidence", "AbuseIPDB: yüksək əminlik"),
+    "ev_abuse_m": ("AbuseIPDB: moderate confidence", "AbuseIPDB: orta əminlik"),
+    "ev_otx": ("AlienVault OTX: threat pulses found", "AlienVault OTX: təhdid pulsları tapıldı"),
+    # ---------- Engine details ----------
+    "e_timeout": ("Request timed out.", "Sorğu timeout oldu."),
+    "e_nokey": ("{name} is missing in .env", "{name} .env-də yoxdur"),
+    "e_apikey_bad": ("API key is invalid ({code}).", "API key etibarsızdır ({code})."),
+    "e_authkey_bad": ("Auth-Key was rejected ({code}).", "Auth-Key qəbul edilmədi ({code})."),
+    "e_rate": ("Rate limit ({code}).", "Rate limit ({code})."),
+    "vt_notfound": ("Object not found in VirusTotal.", "VirusTotal-da obyekt tapılmadı."),
+    "vt_detail": ("Malicious: {m} | Suspicious: {s} | Total: {t}", "Zərərli: {m} | Şübhəli: {s} | Cəmi: {t}"),
+    "uh_need_url": ("A URL must be provided for URLhaus.", "URLhaus üçün URL daxil edilməlidir."),
+    "uh_detail": ("Threat: {threat} | Status: {status} | Tags: {tags}", "Təhdid: {threat} | Status: {status} | Teqlər: {tags}"),
+    "uh_detail_nt": ("Threat: {threat} | Status: {status} | Tags: none", "Təhdid: {threat} | Status: {status} | Teqlər: yoxdur"),
+    "uh_notfound": ("URL not found in the URLhaus database.", "URL URLhaus database-də tapılmadı."),
+    "uh_qs": ("query_status: {qs}", "query_status: {qs}"),
+    "ab_noip": ("Could not resolve an IP address.", "IP həll edilə bilmədi."),
+    "ab_detail": ("Abuse Confidence: {conf}% | Reports: {reports}", "Sui-istifadə Əminliyi: {conf}% | Hesabatlar: {reports}"),
+    "otx_pulses": ("Threat Pulses: {count}", "Təhdid Pulsları: {count}"),
+    "otx_timeout": ("OTX timed out ({sec}s).", "OTX timeout oldu ({sec}s)."),
+    "pt_need_url": ("A URL must be provided for PhishTank.", "PhishTank üçün URL daxil edilməlidir."),
+    "pt_verified": ("Verified phishing URL", "Təsdiqlənmiş fişinq URL-i"),
+    "pt_partial": ("URL is in the database, but not fully verified/valid.", "URL database-də var, lakin tam verified/valid deyil."),
+    "pt_notfound": ("URL not found in the PhishTank database.", "URL PhishTank database-də tapılmadı."),
+    "op_need_url": ("A URL is required.", "URL tələb olunur."),
+    "op_found": ("URL found in the OpenPhish feed.", "URL OpenPhish feed-də tapıldı."),
+    "op_notfound": ("URL not found in the OpenPhish feed.", "URL OpenPhish feed-də tapılmadı."),
+    "na_file": ("Not applicable to files.", "Fayl üçün tətbiq edilmir."),
+    # ---------- Network context ----------
+    "rdns_none": ("Reverse DNS not found", "Reverse DNS tapılmadı"),
+    "geo_unknown_ip": ("Unknown", "Naməlum"),
+    "geo_unknown": ("Unknown", "Bilinmir"),
+    "geo_file": ("Local File Analysis", "Lokal Fayl Analizi"),
+    "whois_ip": ("This is an IP address — domain age does not apply.", "IP ünvanıdır — domen yaşı tətbiq edilmir."),
+    "whois_none": ("Domain registration data not found.", "Domen qeydiyyat məlumatı tapılmadı."),
+    "whois_unavail": ("Domain age: data not available.", "Domen yaşı: məlumat mövcud deyil."),
+    "whois_age": ("Domain age: {days} days", "Domen yaşı: {days} gün"),
+    "whois_calc": ("Domain age could not be calculated.", "Domen yaşı hesablana bilmədi."),
+    "whois_timeout": ("RDAP request timed out.", "RDAP sorğusu timeout oldu."),
+    "whois_fail": ("Domain age could not be determined.", "Domen yaşı müəyyən edilə bilmədi."),
+    "ssl_ok": ("SSL Active ({issuer})", "SSL Aktiv ({issuer})"),
+    "ssl_none": ("No SSL certificate / not verified", "SSL Sertifikatı yoxdur / yoxlanılmadı"),
+    # ---------- AI triage text (HTML) ----------
+    "ai_dom_1": ("An IOC analysis of type <b>{type}</b> was performed for target <b>{target}</b>.", "<b>{target}</b> hədəfi üçün <b>{type}</b> tipli IOC analizi aparıldı."),
+    "ai_dom_2": ("<br><br>Available CTI engines: <b>{n}</b>/6.", "<br><br>Mövcud CTI mühərrikləri: <b>{n}</b>/6."),
+    "ai_dom_3": ("<br>Sources reporting malicious: <b>{m}</b>.", "<br>Zərərli nəticə verən mənbələr: <b>{m}</b>."),
+    "ai_dom_4": ("<br>Final Truvex Threat Index: <b>{score}/100 ({verdict})</b>.", "<br>Yekun Truvex Təhdid İndeksi: <b>{score}/100 ({verdict})</b>."),
+    "ai_ev_head": ("<br><br><b>Risk evidence:</b><br>", "<br><br><b>Risk sübutları:</b><br>"),
+    "ai_ev_none": ("<br><br>No significant malicious evidence was found in the available sources.", "<br><br>Mövcud mənbələrdə əhəmiyyətli zərərli sübut aşkar edilmədi."),
+    "ai_file_1": ("A static hash analysis was performed for file <b>{filename}</b>.", "<b>{filename}</b> faylı üçün statik hash analizi aparıldı."),
+    "ai_file_2": ("<br><br>MD5: <code>{md5}</code><br>SHA1: <code>{sha1}</code><br>SHA256: <code>{sha256}</code>", "<br><br>MD5: <code>{md5}</code><br>SHA1: <code>{sha1}</code><br>SHA256: <code>{sha256}</code>"),
+    "ai_file_3": ("<br><br>VirusTotal result: <b>{vt}</b>.<br>TTI: <b>{score}/100 ({verdict})</b>.", "<br><br>VirusTotal nəticəsi: <b>{vt}</b>.<br>TTI: <b>{score}/100 ({verdict})</b>."),
+    "ai_demo": ("<b>Demo mode:</b> This report is synthetic and is intended only for presentation/testing.", "<b>Demo rejimi:</b> Bu hesabat sintetikdir və yalnız təqdimat/test üçündür."),
+    "ai_legacy": ("No extended report data was stored for this historical scan.", "Tarixi skan üçün saxlanılmış geniş hesabat məlumatı yoxdur."),
+    # ---------- Demo data ----------
+    "demo_vt": ("Demo detection: {p}/{t}", "Demo aşkarlama: {p}/{t}"),
+    "demo_url": ("Demo malicious URL", "Demo zərərli URL"),
+    "demo_plain": ("Demo", "Demo"),
+    "demo_pulses": ("Demo threat pulses: {n}", "Demo təhdid pulsları: {n}"),
+    "demo_phish": ("Demo verified phishing", "Demo təsdiqlənmiş fişinq"),
+    "demo_whois": ("Demo data — not a real WHOIS lookup", "Demo məlumat — real WHOIS sorğusu deyil"),
+    "demo_ssl": ("Demo SSL context", "Demo SSL konteksti"),
+    # ---------- HTTP messages ----------
+    "err_no_indicator": ("No indicator was entered.", "İndikator daxil edilməyib."),
+    "err_no_file": ("No file provided.", "Fayl yoxdur."),
+    "err_empty_file": ("The file is empty.", "Fayl boşdur."),
+    "err_scan_nf": ("Scan not found.", "Skan tapılmadı."),
+    "err_no_report": ("No report data exists for this scan.", "Bu skan üçün hesabat məlumatı mövcud deyil."),
+    # ---------- Incident page ----------
+    "inc_title": ("🛡️ TRUVEX Incident Details", "🛡️ TRUVEX İnsident Təfərrüatları"),
+    "inc_back": ("← Dashboard", "← Panel"),
+    "inc_indicator": ("Indicator", "İndikator"),
+    "inc_type": ("Type", "Tip"),
+    "inc_id": ("Incident ID", "İnsident ID"),
+    "inc_none": ("No incident", "İnsident yoxdur"),
+    "inc_created": ("Created", "Yaradılıb"),
+    "inc_cti_ev": ("CTI Evidence", "CTI Sübutları"),
+    "inc_engine": ("Engine", "Mühərrik"),
+    "inc_status": ("Status", "Status"),
+    "inc_detail": ("Detail", "Təfərrüat"),
+    "inc_no_cti": ("No CTI report data.", "CTI hesabat məlumatı yoxdur."),
+    "inc_no_ev": ("No evidence recorded.", "Sübut qeyd edilməyib."),
+    "inc_notes": ("Analyst Notes", "Analitik Qeydləri"),
+    "inc_notes_ph": ("Analyst note...", "Analitik qeydi..."),
+    "inc_save": ("Save Notes", "Qeydləri Saxla"),
+    "inc_pdf": ("PDF Report", "PDF Hesabat"),
+    "inc_json": ("Export JSON", "JSON İxrac"),
+    # ---------- Engine health page ----------
+    "eh_title": ("TRUVEX Engine Health", "TRUVEX Mühərrik Vəziyyəti"),
+    "eh_head": ("⚙️ CTI Engine Health", "⚙️ CTI Mühərrik Vəziyyəti"),
+    "eh_ready": ("CONFIGURED / READY", "QURULUB / HAZIRDIR"),
+    "eh_not": ("NOT CONFIGURED", "QURULMAYIB"),
+    # ---------- PDF report ----------
+    "pdf_title": ("TRUVEX CTI INCIDENT REPORT", "TRUVEX CTI İNSİDENT HESABATI"),
+    "pdf_generated": ("Generated", "Yaradılma vaxtı"),
+    "pdf_verdict": ("Verdict", "Nəticə"),
+    "pdf_timestamp": ("Timestamp", "Vaxt damğası"),
+    "pdf_no_ev": ("No recorded malicious evidence.", "Qeydə alınmış zərərli sübut yoxdur."),
+    "pdf_cti_sources": ("CTI Sources", "CTI Mənbələri"),
+    "pdf_no_mitre": ("No MITRE mapping recorded.", "MITRE uyğunlaşdırması qeyd edilməyib."),
+    "pdf_context": ("Network / Context", "Şəbəkə / Kontekst"),
+    "pdf_ip": ("IP", "IP"),
+    "pdf_country": ("Country", "Ölkə"),
+    "pdf_resolved": ("Resolved Domain", "Həll olunmuş Domen"),
+    "pdf_whois": ("WHOIS", "WHOIS"),
+    "pdf_no_notes": ("No analyst notes.", "Analitik qeydi yoxdur."),
+    "none": ("none", "yoxdur"),
+}
+
+_MSG_RE = re.compile("\x1e([A-Za-z0-9_\\-]+)\x1f(.*?)\x1d", re.S)
+
+
+def get_lang():
+    try:
+        code = request.cookies.get(LANG_COOKIE, DEFAULT_LANG)
+    except RuntimeError:
+        code = DEFAULT_LANG
+    return code if code in LANGS else DEFAULT_LANG
+
+
+def t(key, **params):
+    entry = S.get(key)
+    if not entry:
+        return key
+    text = entry[LANGS.index(get_lang())] or entry[0]
+    if params:
+        try:
+            return text.format(**params)
+        except Exception:
+            return text
+    return text
+
+
+def M(key, **params):
+    """Dil-neytral mesaj: DB-də açar kimi saxlanılır, göstərilən zaman tərcümə olunur."""
+    return "\x1e" + key + "\x1f" + json.dumps(params, ensure_ascii=False) + "\x1d"
+
+
+def _msg_sub(match, html):
+    key = match.group(1)
+    try:
+        params = json.loads(match.group(2))
+    except Exception:
+        params = {}
+    if "verdict" in params:
+        params["verdict"] = verdict_t(params["verdict"])
+    if "type" in params:
+        params["type"] = type_t(params["type"])
+    if "vt" in params:
+        params["vt"] = status_t(params["vt"])
+    if html:
+        params = {k: str(h_escape(str(v))) for k, v in params.items()}
+    return t(key, **params)
+
+
+def tx(value):
+    """M(...) mesajlarını cari dildə mətn kimi açır. Adi mətni olduğu kimi qaytarır."""
+    if not isinstance(value, str) or "\x1e" not in value:
+        return value
+    return _MSG_RE.sub(lambda m: _msg_sub(m, False), value)
+
+
+def txh(value):
+    """Eyni, amma HTML üçün (parametrlər escape olunur, şablon HTML-dir)."""
+    if not isinstance(value, str):
+        return value
+    return Markup(_MSG_RE.sub(lambda m: _msg_sub(m, True), value))
+
+
+def tx_deep(obj):
+    if isinstance(obj, str):
+        return tx(obj)
+    if isinstance(obj, list):
+        return [tx_deep(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: tx_deep(v) for k, v in obj.items()}
+    return obj
+
+
+def verdict_t(v):
+    return t("v_" + str(v)) if ("v_" + str(v)) in S else str(v)
+
+
+def status_t(s):
+    return t("s_" + str(s)) if ("s_" + str(s)) in S else str(s)
+
+
+def type_t(x):
+    return t("ty_" + str(x)) if ("ty_" + str(x)) in S else str(x)
+
+
+def status_cls(s):
+    if s == "MALICIOUS":
+        return "st-bad"
+    if s == "SUSPICIOUS":
+        return "st-warn"
+    if s in ("CLEAN", "NOT_FOUND", "NOT_LISTED"):
+        return "st-ok"
+    return "st-na"
+
+
+def tag_t(tag):
+    tag = str(tag).strip()
+    m = re.fullmatch(r"CTI-(\d+)-Sources", tag)
+    if m:
+        return t("tg_cti_sources", n=m.group(1))
+    return t("tg_" + tag) if ("tg_" + tag) in S else tag
+
+
+def tags_t(tags):
+    if isinstance(tags, str):
+        tags = tags.split(",")
+    return ", ".join(tag_t(x) for x in tags if str(x).strip())
+
+
+def mitre_t(m):
+    if not m:
+        return m
+    mid = m.get("id", "")
+    out = dict(m)
+    for field in ("name", "tactic", "desc"):
+        key = f"mt_{mid}_{field}"
+        if key in S:
+            out["description" if field == "desc" else field] = t(key)
+    return out
+
+
+LANG_CSS = """
+.lang-switch{display:flex;gap:8px;align-items:center}
+.lang-switch .lang-label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-right:2px}
+.lang-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:999px;border:1px solid var(--border);
+background:var(--panel2);color:var(--text);text-decoration:none;font-size:12px;font-weight:700;transition:all .15s}
+.lang-btn:hover{border-color:var(--cyan);box-shadow:0 0 14px rgba(0,229,255,.35)}
+.lang-btn.active{background:var(--grad);border-color:transparent;color:#fff;box-shadow:0 0 18px rgba(157,77,255,.55)}
+"""
+
+
+def lang_switch_html():
+    cur = get_lang()
+    nxt = request.full_path.rstrip("?") if request else "/"
+    parts = [f'<div class="lang-switch"><span class="lang-label">{h_escape(t("lang_label"))}</span>']
+    for code, flag in (("en", "🇬🇧"), ("az", "🇦🇿")):
+        href = url_for("set_lang", code=code, next=nxt)
+        cls = "lang-btn active" if code == cur else "lang-btn"
+        parts.append(f'<a class="{cls}" href="{h_escape(href)}" hreflang="{code}">{flag} {h_escape(t("lang_" + code))}</a>')
+    parts.append("</div>")
+    return Markup("".join(parts))
+
+
+@app.context_processor
+def inject_i18n():
+    return {
+        "t": t, "tx": tx, "txh": txh, "lang": get_lang(),
+        "verdict_t": verdict_t, "status_t": status_t, "type_t": type_t,
+        "status_cls": status_cls, "tag_t": tag_t, "tags_t": tags_t, "mitre_t": mitre_t,
+        "lang_switch": lang_switch_html(), "app_css": Markup(APP_CSS + LANG_CSS),
+    }
 
 
 # ============================================================
@@ -440,46 +963,34 @@ def calculate_decay(score):
 
     if score >= 75:
         return {
-            "trend": "Rapid Degrading (Şiddətli risk artımı)",
+            "trend": M("decay_t_rapid"),
             "history": [20, 50, score],
-            "forecast": (
-                "Yüksək riskli profil. Əlavə araşdırma və "
-                "monitorinq tövsiyə olunur."
-            ),
-            "color": "#f43f5e"
+            "forecast": M("decay_f_rapid"),
+            "color": "#ff2d55"
         }
 
     elif score >= 50:
         return {
-            "trend": "Elevated Risk (Artmış risk)",
+            "trend": M("decay_t_elev"),
             "history": [15, 35, score],
-            "forecast": (
-                "Təhdid göstəriciləri müşahidə olunur. "
-                "Yaxından izlənilməsi tövsiyə edilir."
-            ),
-            "color": "#fbbf24"
+            "forecast": M("decay_f_elev"),
+            "color": "#ff7a00"
         }
 
     elif score > 0:
         return {
-            "trend": "Limited Evidence (Məhdud sübut)",
+            "trend": M("decay_t_lim"),
             "history": [5, 10, score],
-            "forecast": (
-                "Məhdud threat intelligence sübutu mövcuddur. "
-                "Risk aşağı səviyyədə qiymətləndirilir."
-            ),
-            "color": "#fbbf24"
+            "forecast": M("decay_f_lim"),
+            "color": "#ffd60a"
         }
 
     else:
         return {
-            "trend": "Stable / No Evidence",
+            "trend": M("decay_t_stable"),
             "history": [0, 0, 0],
-            "forecast": (
-                "Mövcud CTI mənbələrində əhəmiyyətli təhlükə "
-                "sübutu aşkar edilmədi."
-            ),
-            "color": "#10b981"
+            "forecast": M("decay_f_stable"),
+            "color": "#00ff9d"
         }
 
 
@@ -565,7 +1076,7 @@ def check_virustotal(target):
     if not VT_API_KEY:
         return _not_configured(
             "VirusTotal",
-            "VT_API_KEY .env-də yoxdur"
+            M("e_nokey", name="VT_API_KEY")
         )
 
     indicator_type = detect_indicator_type(target)
@@ -648,19 +1159,19 @@ def check_virustotal(target):
                 "positives": 0,
                 "suspicious": 0,
                 "total": 0,
-                "detail": "VirusTotal-da obyekt tapılmadı."
+                "detail": M("vt_notfound")
             }
 
         if r.status_code == 401:
             return _error_result(
                 "VirusTotal",
-                "API key etibarsızdır (401)."
+                M("e_apikey_bad", code=401)
             )
 
         if r.status_code == 429:
             return _error_result(
                 "VirusTotal",
-                "Rate limit (429)."
+                M("e_rate", code=429)
             )
 
         r.raise_for_status()
@@ -714,9 +1225,7 @@ def check_virustotal(target):
             "suspicious": suspicious,
             "total": total,
             "detail": (
-                f"Malicious: {malicious} | "
-                f"Suspicious: {suspicious} | "
-                f"Total: {total}"
+                M("vt_detail", m=malicious, s=suspicious, t=total)
             )
         }
 
@@ -724,7 +1233,7 @@ def check_virustotal(target):
 
         return _error_result(
             "VirusTotal",
-            "Sorğu timeout oldu."
+            M("e_timeout")
         )
 
     except Exception as e:
@@ -748,14 +1257,14 @@ def check_urlhaus(target):
             "malicious": False,
             "available": False,
             "status": "SKIPPED",
-            "detail": "URLhaus üçün URL daxil edilməlidir."
+            "detail": M("uh_need_url")
         }
 
     if not URLHAUS_AUTH_KEY:
 
         return _not_configured(
             "URLhaus",
-            "URLHAUS_AUTH_KEY .env-də yoxdur"
+            M("e_nokey", name="URLHAUS_AUTH_KEY")
         )
 
     try:
@@ -776,7 +1285,7 @@ def check_urlhaus(target):
 
             return _error_result(
                 "URLhaus",
-                f"Auth-Key qəbul edilmədi ({r.status_code})."
+                M("e_authkey_bad", code=r.status_code)
             )
 
         r.raise_for_status()
@@ -812,9 +1321,7 @@ def check_urlhaus(target):
                 "status": "MALICIOUS",
                 "malware_download": malware_download,
                 "detail": (
-                    f"Threat: {threat} | "
-                    f"Status: {url_status} | "
-                    f"Tags: {', '.join(tags) if tags else 'none'}"
+                    M("uh_detail", threat=threat, status=url_status, tags=", ".join(tags)) if tags else M("uh_detail_nt", threat=threat, status=url_status)
                 )
             }
 
@@ -826,7 +1333,7 @@ def check_urlhaus(target):
                 "available": True,
                 "status": "NOT_LISTED",
                 "detail": (
-                    "URL URLhaus database-də tapılmadı."
+                    M("uh_notfound")
                 )
             }
 
@@ -835,14 +1342,14 @@ def check_urlhaus(target):
             "malicious": False,
             "available": True,
             "status": "UNKNOWN",
-            "detail": f"query_status: {qs}"
+            "detail": M("uh_qs", qs=qs)
         }
 
     except requests.exceptions.Timeout:
 
         return _error_result(
             "URLhaus",
-            "Sorğu timeout oldu."
+            M("e_timeout")
         )
 
     except Exception as e:
@@ -877,14 +1384,14 @@ def check_abuseipdb(target):
                 "malicious": False,
                 "available": False,
                 "status": "SKIPPED",
-                "detail": "IP həll edilə bilmədi."
+                "detail": M("ab_noip")
             }
 
     if not ABUSEIPDB_API_KEY:
 
         return _not_configured(
             "AbuseIPDB",
-            "ABUSEIPDB_API_KEY .env-də yoxdur"
+            M("e_nokey", name="ABUSEIPDB_API_KEY")
         )
 
     try:
@@ -906,7 +1413,7 @@ def check_abuseipdb(target):
 
             return _error_result(
                 "AbuseIPDB",
-                "API key etibarsızdır (401)."
+                M("e_apikey_bad", code=401)
             )
 
         r.raise_for_status()
@@ -946,8 +1453,7 @@ def check_abuseipdb(target):
             "status": status,
             "confidence": conf,
             "detail": (
-                f"Abuse Confidence: {conf}% | "
-                f"Reports: {reports}"
+                M("ab_detail", conf=conf, reports=reports)
             )
         }
 
@@ -955,7 +1461,7 @@ def check_abuseipdb(target):
 
         return _error_result(
             "AbuseIPDB",
-            "Sorğu timeout oldu."
+            M("e_timeout")
         )
 
     except Exception as e:
@@ -1032,14 +1538,14 @@ def check_alienvault_otx(target):
                 else "NOT_LISTED"
             ),
             "pulses": count,
-            "detail": f"Threat Pulses: {count}"
+            "detail": M("otx_pulses", count=count)
         }
 
     except requests.exceptions.Timeout:
 
         return _error_result(
             "AlienVault OTX",
-            f"OTX timeout oldu ({OTX_TIMEOUT}s)."
+            M("otx_timeout", sec=OTX_TIMEOUT)
         )
 
     except Exception as e:
@@ -1064,7 +1570,7 @@ def check_phishtank(target):
             "available": False,
             "status": "SKIPPED",
             "detail": (
-                "PhishTank üçün URL daxil edilməlidir."
+                M("pt_need_url")
             )
         }
 
@@ -1091,7 +1597,7 @@ def check_phishtank(target):
 
             return _error_result(
                 "PhishTank",
-                "Rate limit (509)."
+                M("e_rate", code=509)
             )
 
         r.raise_for_status()
@@ -1134,7 +1640,7 @@ def check_phishtank(target):
                     "available": True,
                     "status": "MALICIOUS",
                     "detail": (
-                        "Verified phishing URL"
+                        M("pt_verified")
                     )
                 }
 
@@ -1146,8 +1652,7 @@ def check_phishtank(target):
                     "available": True,
                     "status": "SUSPICIOUS",
                     "detail": (
-                        "URL database-də var, "
-                        "lakin tam verified/valid deyil."
+                        M("pt_partial")
                     )
                 }
 
@@ -1157,7 +1662,7 @@ def check_phishtank(target):
             "available": True,
             "status": "NOT_LISTED",
             "detail": (
-                "URL PhishTank database-də tapılmadı."
+                M("pt_notfound")
             )
         }
 
@@ -1165,7 +1670,7 @@ def check_phishtank(target):
 
         return _error_result(
             "PhishTank",
-            "Sorğu timeout oldu."
+            M("e_timeout")
         )
 
     except Exception as e:
@@ -1189,7 +1694,7 @@ def check_openphish(target):
             "malicious": False,
             "available": False,
             "status": "SKIPPED",
-            "detail": "URL tələb olunur."
+            "detail": M("op_need_url")
         }
 
     try:
@@ -1225,10 +1730,10 @@ def check_openphish(target):
                 else "NOT_LISTED"
             ),
             "detail": (
-                "URL OpenPhish feed-də tapıldı."
+                M("op_found")
                 if found
                 else
-                "URL OpenPhish feed-də tapılmadı."
+                M("op_notfound")
             )
         }
 
@@ -1236,7 +1741,7 @@ def check_openphish(target):
 
         return _error_result(
             "OpenPhish",
-            "Sorğu timeout oldu."
+            M("e_timeout")
         )
 
     except Exception as e:
@@ -1253,7 +1758,7 @@ def check_openphish(target):
 
 def get_ip_geolocation(target):
 
-    resolved_domain = "Reverse DNS tapılmadı"
+    resolved_domain = M("rdns_none")
 
     try:
 
@@ -1270,7 +1775,7 @@ def get_ip_geolocation(target):
             try:
                 resolved_domain = socket.gethostbyaddr(host)[0]
             except Exception:
-                resolved_domain = "Reverse DNS tapılmadı"
+                resolved_domain = M("rdns_none")
 
         except ValueError:
             pass
@@ -1286,8 +1791,8 @@ def get_ip_geolocation(target):
         except Exception:
 
             return (
-                "Naməlum",
-                "Bilinmir",
+                M("geo_unknown_ip"),
+                M("geo_unknown"),
                 "🌍",
                 resolved_domain
             )
@@ -1318,7 +1823,7 @@ def get_ip_geolocation(target):
 
             country = data.get(
                 "country",
-                "Bilinmir"
+                M("geo_unknown")
             )
 
             city = data.get(
@@ -1352,8 +1857,8 @@ def get_ip_geolocation(target):
         pass
 
     return (
-        "Naməlum",
-        "Bilinmir",
+        M("geo_unknown_ip"),
+        M("geo_unknown"),
         "🌍",
         resolved_domain
     )
@@ -1375,7 +1880,7 @@ def check_domain_whois(target):
             return (
                 False,
                 None,
-                "IP ünvanıdır — domen yaşı tətbiq edilmir."
+                M("whois_ip")
             )
 
         except ValueError:
@@ -1401,7 +1906,7 @@ def check_domain_whois(target):
             return (
                 False,
                 None,
-                "Domen qeydiyyat məlumatı tapılmadı."
+                M("whois_none")
             )
 
         r.raise_for_status()
@@ -1433,7 +1938,7 @@ def check_domain_whois(target):
             return (
                 True,
                 None,
-                "Domen yaşı: məlumat mövcud deyil."
+                M("whois_unavail")
             )
 
         try:
@@ -1457,7 +1962,7 @@ def check_domain_whois(target):
             return (
                 True,
                 age_days,
-                f"Domen yaşı: {age_days} gün"
+                M("whois_age", days=age_days)
             )
 
         except Exception:
@@ -1465,7 +1970,7 @@ def check_domain_whois(target):
             return (
                 True,
                 None,
-                "Domen yaşı hesablana bilmədi."
+                M("whois_calc")
             )
 
     except requests.exceptions.Timeout:
@@ -1473,7 +1978,7 @@ def check_domain_whois(target):
         return (
             False,
             None,
-            "RDAP sorğusu timeout oldu."
+            M("whois_timeout")
         )
 
     except Exception:
@@ -1481,7 +1986,7 @@ def check_domain_whois(target):
         return (
             False,
             None,
-            "Domen yaşı müəyyən edilə bilmədi."
+            M("whois_fail")
         )
 
 
@@ -1522,14 +2027,14 @@ def check_ssl_certificate(target):
 
                 return (
                     True,
-                    f"SSL Aktiv ({issuer})"
+                    M("ssl_ok", issuer=issuer)
                 )
 
     except Exception:
 
         return (
             False,
-            "SSL Sertifikatı yoxdur / yoxlanılmadı"
+            M("ssl_none")
         )
 
 
@@ -1584,7 +2089,7 @@ def calculate_tti(cti):
                 score += 35
 
                 evidence.append(
-                    "VirusTotal: high malicious ratio"
+                    M("ev_vt_high")
                 )
 
             # Moderate consensus
@@ -1593,7 +2098,7 @@ def calculate_tti(cti):
                 score += 20
 
                 evidence.append(
-                    "VirusTotal: elevated malicious ratio"
+                    M("ev_vt_elev")
                 )
 
             # Limited detections
@@ -1602,7 +2107,7 @@ def calculate_tti(cti):
                 score += 5
 
                 evidence.append(
-                    "VirusTotal: limited detections"
+                    M("ev_vt_lim")
                 )
 
         if suspicious > 0 and malicious == 0:
@@ -1610,7 +2115,7 @@ def calculate_tti(cti):
             score += 3
 
             evidence.append(
-                "VirusTotal: suspicious engines"
+                M("ev_vt_susp")
             )
 
     # --------------------------------------------------------
@@ -1627,7 +2132,7 @@ def calculate_tti(cti):
         score += 30
 
         evidence.append(
-            "URLhaus: malicious URL"
+            M("ev_urlhaus")
         )
 
     # --------------------------------------------------------
@@ -1644,7 +2149,7 @@ def calculate_tti(cti):
         score += 30
 
         evidence.append(
-            "PhishTank: verified phishing"
+            M("ev_phish")
         )
 
     # --------------------------------------------------------
@@ -1661,7 +2166,7 @@ def calculate_tti(cti):
         score += 30
 
         evidence.append(
-            "OpenPhish: malicious URL"
+            M("ev_openphish")
         )
 
     # --------------------------------------------------------
@@ -1687,7 +2192,7 @@ def calculate_tti(cti):
             score += 25
 
             evidence.append(
-                "AbuseIPDB: very high confidence"
+                M("ev_abuse_vh")
             )
 
         elif confidence >= 70:
@@ -1695,7 +2200,7 @@ def calculate_tti(cti):
             score += 20
 
             evidence.append(
-                "AbuseIPDB: high confidence"
+                M("ev_abuse_h")
             )
 
         elif confidence >= 50:
@@ -1703,7 +2208,7 @@ def calculate_tti(cti):
             score += 10
 
             evidence.append(
-                "AbuseIPDB: moderate confidence"
+                M("ev_abuse_m")
             )
 
     # --------------------------------------------------------
@@ -1720,7 +2225,7 @@ def calculate_tti(cti):
         score += 10
 
         evidence.append(
-            "AlienVault OTX: threat pulses found"
+            M("ev_otx")
         )
 
     # --------------------------------------------------------
@@ -1765,1404 +2270,264 @@ def calculate_tti(cti):
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="az">
-
+<html lang="{{ lang }}">
 <head>
-
 <meta charset="UTF-8">
-
-<title>
-Truvex v16.0 | CTI Platform
-</title>
-
-<style>
-
-body {
-    font-family:
-        'Segoe UI',
-        Tahoma,
-        Geneva,
-        Verdana,
-        sans-serif;
-
-    background: #07090e;
-    color: #f8fafc;
-
-    margin: 0;
-    padding: 30px;
-
-    display: flex;
-    justify-content: center;
-}
-
-.container {
-
-    width: 1040px;
-
-    background: #0d1322;
-
-    padding: 40px;
-
-    border-radius: 16px;
-
-    box-shadow:
-        0 15px 35px rgba(0,0,0,0.9);
-
-    border:
-        1px solid #1e293b;
-}
-
-.top-bar {
-
-    display: flex;
-
-    justify-content:
-        space-between;
-
-    align-items: center;
-
-    margin-bottom: 10px;
-}
-
-.logo-area {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 12px;
-}
-
-h2 {
-
-    color: #38bdf8;
-
-    margin: 0;
-
-    font-size: 26px;
-
-    letter-spacing: 1.5px;
-
-    font-weight: 800;
-}
-
-.subtitle {
-
-    color: #64748b;
-
-    font-size: 12px;
-
-    margin-bottom: 25px;
-
-    text-transform: uppercase;
-
-    letter-spacing: 2px;
-
-    font-weight: 600;
-}
-
-.tabs {
-
-    display: flex;
-
-    justify-content: center;
-
-    gap: 12px;
-
-    margin-bottom: 25px;
-}
-
-.tab-btn {
-
-    background: #111827;
-
-    color: #94a3b8;
-
-    border:
-        1px solid #1f2937;
-
-    padding:
-        10px 22px;
-
-    border-radius: 8px;
-
-    cursor: pointer;
-
-    font-weight: 600;
-}
-
-.tab-btn.active {
-
-    background: #0284c7;
-
-    color: white;
-
-    border-color: #0284c7;
-}
-
-.section-box {
-
-    display: none;
-
-    border:
-        2px dashed #1e293b;
-
-    padding: 30px;
-
-    text-align: center;
-
-    border-radius: 12px;
-
-    background: #0b0f19;
-}
-
-.section-box.active {
-
-    display: block;
-}
-
-input[type="text"] {
-
-    color: #cbd5e1;
-
-    margin-bottom: 15px;
-
-    padding: 11px;
-
-    width: 75%;
-
-    background: #131b2e;
-
-    border:
-        1px solid #334155;
-
-    border-radius: 6px;
-}
-
-button[type="submit"] {
-
-    padding:
-        11px 24px;
-
-    background: #0284c7;
-
-    color: white;
-
-    border: none;
-
-    border-radius: 6px;
-
-    cursor: pointer;
-
-    font-weight: bold;
-
-    font-size: 14px;
-}
-
-.results {
-
-    margin-top: 30px;
-
-    background: #0b0f19;
-
-    padding: 30px;
-
-    border-radius: 12px;
-
-    border:
-        1px solid #1e293b;
-
-    text-align: left;
-}
-
-.risk-critical {
-
-    color: #f43f5e;
-
-    font-weight: 850;
-
-    background:
-        rgba(244,63,94,0.1);
-
-    padding: 4px 10px;
-
-    border-radius: 4px;
-
-    border:
-        1px solid rgba(244,63,94,0.3);
-}
-
-.risk-safe {
-
-    color: #10b981;
-
-    font-weight: 850;
-
-    background:
-        rgba(16,185,129,0.1);
-
-    padding: 4px 10px;
-
-    border-radius: 4px;
-
-    border:
-        1px solid rgba(16,185,129,0.3);
-}
-
-.risk-low {
-
-    color: #fbbf24;
-
-    font-weight: 850;
-}
-
-.incident-badge {
-
-    background: #1e1b4b;
-
-    border:
-        1px solid #4f46e5;
-
-    padding: 12px 18px;
-
-    border-radius: 8px;
-
-    margin-bottom: 20px;
-
-    display: flex;
-
-    justify-content: space-between;
-
-    align-items: center;
-}
-
-.mitre-box {
-
-    background: #18122b;
-
-    border:
-        1px solid #7c3aed;
-
-    padding: 15px;
-
-    border-radius: 8px;
-
-    margin-top: 20px;
-}
-
-.decay-box {
-
-    background: #111827;
-
-    border:
-        1px solid #334155;
-
-    padding: 15px;
-
-    border-radius: 8px;
-
-    margin-top: 20px;
-}
-
-.tag {
-
-    background: #334155;
-
-    color: #e2e8f0;
-
-    padding: 2px 8px;
-
-    border-radius: 4px;
-
-    font-size: 11px;
-
-    font-weight: 600;
-
-    margin-right: 5px;
-}
-
-.cti-grid {
-
-    display: grid;
-
-    grid-template-columns:
-        1fr 1fr 1fr;
-
-    gap: 12px;
-
-    margin-top: 20px;
-}
-
-.cti-card {
-
-    background: #131b2e;
-
-    border:
-        1px solid #334155;
-
-    padding: 14px;
-
-    border-radius: 8px;
-
-    font-size: 13px;
-}
-
-.ai-report {
-
-    background: #12102e;
-
-    border:
-        1px solid #4f46e5;
-
-    padding: 22px;
-
-    border-radius: 10px;
-
-    margin-top: 25px;
-
-    color: #e0e7ff;
-
-    line-height: 1.7;
-}
-
-.feed-section {
-
-    margin-top: 35px;
-
-    background: #0b0f19;
-
-    border:
-        1px solid #1e293b;
-
-    padding: 20px;
-
-    border-radius: 12px;
-}
-
-.feed-item {
-
-    display: flex;
-
-    justify-content:
-        space-between;
-
-    align-items: center;
-
-    padding: 8px 12px;
-
-    border-bottom:
-        1px solid #131b2e;
-
-    font-size: 12px;
-
-    color: #94a3b8;
-}
-
-.footer {
-
-    text-align: center;
-
-    margin-top: 40px;
-
-    color: #475569;
-
-    font-size: 12px;
-}
-
-
-.dashboard-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:18px 0}.stat-card{background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:14px}.stat-card span{display:block;color:#64748b;font-size:10px;text-transform:uppercase}.stat-card strong{display:block;color:#e2e8f0;font-size:25px;margin:6px 0}.stat-card small{color:#475569;font-size:10px}.analytics-box{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:15px}.analytics-col,.filter-box{background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:14px}.analytics-col h4{margin:0 0 10px;color:#38bdf8;font-size:11px;text-transform:uppercase}.mini-bars div,.type-line{display:flex;justify-content:space-between;padding:5px 0;color:#94a3b8;font-size:11px;border-bottom:1px solid #111827}.mini-bars b,.type-line b{color:#e2e8f0}.filter-form{display:flex;gap:8px;flex-wrap:wrap}.filter-form input,.filter-form select{background:#07090e;color:#cbd5e1;border:1px solid #334155;border-radius:6px;padding:8px;font-size:11px}.filter-form button,.clear-btn,.action-btn,.delete-btn{border:1px solid #334155;background:#111827;color:#cbd5e1;border-radius:6px;padding:7px 10px;text-decoration:none;font-size:10px;cursor:pointer}.clear-btn{display:inline-flex;align-items:center}.feed-main{display:flex;justify-content:space-between;gap:12px;align-items:center;flex:1}.feed-actions{display:flex;gap:5px;align-items:center}.feed-actions form{margin:0}.score-critical{color:#f43f5e}.score-high{color:#fb7185}.score-medium{color:#fbbf24}.score-low{color:#f59e0b}.score-clean{color:#10b981}.feed-item{display:flex;justify-content:space-between;gap:10px;align-items:center}.muted{color:#475569;font-size:11px}.incident-page{background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:20px;margin-top:20px}.incident-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.detail-card{background:#07090e;border:1px solid #1e293b;border-radius:8px;padding:12px}.detail-card span{display:block;color:#64748b;font-size:10px;text-transform:uppercase}.detail-card b{display:block;color:#e2e8f0;margin-top:5px;word-break:break-word}.notes-area{width:100%;box-sizing:border-box;min-height:110px;background:#07090e;color:#cbd5e1;border:1px solid #334155;border-radius:8px;padding:10px}.report-btn{display:inline-block;background:#0f172a;border:1px solid #38bdf8;color:#38bdf8;padding:7px 10px;border-radius:6px;text-decoration:none;font-size:11px}
-@media(max-width:900px){.dashboard-grid{grid-template-columns:repeat(3,1fr)}.analytics-box{grid-template-columns:1fr}.incident-grid{grid-template-columns:1fr}.feed-item{flex-direction:column;align-items:stretch}.feed-main{flex-direction:column;align-items:flex-start}}
-
-</style>
-
-
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ t('page_title') }}</title>
+<style>{{ app_css }}</style>
 <script>
-
 function switchTab(tabName) {
-
-    document
-        .getElementById('file-section')
-        .classList
-        .remove('active');
-
-    document
-        .getElementById('domain-section')
-        .classList
-        .remove('active');
-
-    document
-        .getElementById('btn-file')
-        .classList
-        .remove('active');
-
-    document
-        .getElementById('btn-domain')
-        .classList
-        .remove('active');
-
-
-    if (tabName === 'file') {
-
-        document
-            .getElementById('file-section')
-            .classList
-            .add('active');
-
-        document
-            .getElementById('btn-file')
-            .classList
-            .add('active');
-
-    } else {
-
-        document
-            .getElementById('domain-section')
-            .classList
-            .add('active');
-
-        document
-            .getElementById('btn-domain')
-            .classList
-            .add('active');
-    }
+    ['file', 'domain'].forEach(function (n) {
+        document.getElementById(n + '-section').classList.toggle('active', n === tabName);
+        document.getElementById('btn-' + n).classList.toggle('active', n === tabName);
+    });
 }
-
 </script>
-
 </head>
-
-
 <body>
-
 <div class="container">
 
-
 <div class="top-bar">
-
-    <div class="logo-area">
-
-        <span>🛡️</span>
-
-        <h2>
-            TRUVEX CORE - CTI PLATFORM
-        </h2>
-
-    </div>
-
+    <div class="logo-area"><span>🛡️</span><h2>{{ t('app_title') }}</h2></div>
+    {{ lang_switch }}
 </div>
-
-
-<div class="subtitle">
-
-Multi-Source Threat Intelligence & IOC Analysis
-
-</div>
-
+<div class="subtitle">{{ t('subtitle') }}</div>
 
 <div class="tabs">
-
-<button
-    id="btn-file"
-    class="tab-btn"
-    onclick="switchTab('file')"
->
-📁 File Analysis
-</button>
-
-
-<button
-    id="btn-domain"
-    class="tab-btn active"
-    onclick="switchTab('domain')"
->
-🌐 URL / Domain / IP / Hash
-</button>
-
+    <button id="btn-file" class="tab-btn" onclick="switchTab('file')">{{ t('tab_file') }}</button>
+    <button id="btn-domain" class="tab-btn active" onclick="switchTab('domain')">{{ t('tab_domain') }}</button>
 </div>
-
 
 <!-- DASHBOARD -->
 <div class="dashboard-grid">
-    <div class="stat-card"><span>Total Scans</span><strong>{{ stats.total }}</strong><small>All telemetry records</small></div>
-    <div class="stat-card"><span>Critical</span><strong>{{ stats.critical }}</strong><small>TTI ≥ 75</small></div>
-    <div class="stat-card"><span>High</span><strong>{{ stats.high }}</strong><small>TTI 50–74</small></div>
-    <div class="stat-card"><span>Average TTI</span><strong>{{ stats.avg_score }}</strong><small>Across all scans</small></div>
-    <div class="stat-card"><span>Last 24h</span><strong>{{ stats.last_24h }}</strong><small>New telemetry</small></div>
-    <div class="stat-card"><span>Last 7d</span><strong>{{ stats.last_7d }}</strong><small>New telemetry</small></div>
+    <div class="stat-card"><span>{{ t('st_total') }}</span><strong>{{ stats.total }}</strong><small>{{ t('st_total_sub') }}</small></div>
+    <div class="stat-card"><span>{{ t('st_critical') }}</span><strong>{{ stats.critical }}</strong><small>{{ t('st_critical_sub') }}</small></div>
+    <div class="stat-card"><span>{{ t('st_high') }}</span><strong>{{ stats.high }}</strong><small>{{ t('st_high_sub') }}</small></div>
+    <div class="stat-card"><span>{{ t('st_avg') }}</span><strong>{{ stats.avg_score }}</strong><small>{{ t('st_avg_sub') }}</small></div>
+    <div class="stat-card"><span>{{ t('st_24h') }}</span><strong>{{ stats.last_24h }}</strong><small>{{ t('st_new') }}</small></div>
+    <div class="stat-card"><span>{{ t('st_7d') }}</span><strong>{{ stats.last_7d }}</strong><small>{{ t('st_new') }}</small></div>
 </div>
 
 <div class="analytics-box">
     <div class="analytics-col">
-        <h4>Severity Distribution</h4>
+        <h4>{{ t('sev_dist') }}</h4>
         <div class="mini-bars">
-            <div><span>CRITICAL</span><b>{{ stats.critical }}</b></div>
-            <div><span>HIGH</span><b>{{ stats.high }}</b></div>
-            <div><span>MEDIUM</span><b>{{ stats.medium }}</b></div>
-            <div><span>LOW</span><b>{{ stats.low }}</b></div>
-            <div><span>CLEAN</span><b>{{ stats.clean }}</b></div>
+            {% for v in ['CRITICAL','HIGH','MEDIUM','LOW','CLEAN'] %}
+            <div class="c-{{ v|lower }}"><span>{{ verdict_t(v) }}</span><b>{{ stats[v|lower] }}</b></div>
+            {% endfor %}
         </div>
     </div>
     <div class="analytics-col">
-        <h4>Indicator Types</h4>
-        {% for typ, count in stats.by_type %}<div class="type-line"><span>{{ typ }}</span><b>{{ count }}</b></div>{% else %}<div class="muted">No data</div>{% endfor %}
+        <h4>{{ t('ind_types') }}</h4>
+        {% for typ, count in stats.by_type %}<div class="type-line"><span>{{ type_t(typ) }}</span><b>{{ count }}</b></div>{% else %}<div class="muted">{{ t('no_data') }}</div>{% endfor %}
     </div>
     <div class="analytics-col">
-        <h4>Top Tags</h4>
-        {% for tag, count in stats.top_tags %}<div class="type-line"><span>{{ tag }}</span><b>{{ count }}</b></div>{% else %}<div class="muted">No data</div>{% endfor %}
+        <h4>{{ t('top_tags') }}</h4>
+        {% for tag, count in stats.top_tags %}<div class="type-line"><span>{{ tags_t(tag) }}</span><b>{{ count }}</b></div>{% else %}<div class="muted">{{ t('no_data') }}</div>{% endfor %}
     </div>
 </div>
 
 <div class="filter-box">
     <form action="/" method="GET" class="filter-form">
-        <input type="text" name="search" value="{{ filters.search }}" placeholder="Search IOC, incident ID or tag">
+        <input type="text" name="search" value="{{ filters.search }}" placeholder="{{ t('search_ph') }}">
         <select name="verdict">
             {% for v in ["ALL","CRITICAL","HIGH","MEDIUM","LOW","CLEAN"] %}
-            <option value="{{ v }}" {% if filters.verdict == v %}selected{% endif %}>{{ v }}</option>
+            <option value="{{ v }}" {% if filters.verdict == v %}selected{% endif %}>{{ t('all') if v == 'ALL' else verdict_t(v) }}</option>
             {% endfor %}
         </select>
         <select name="scan_type">
             {% for v in ["ALL","pure-cti","fayl","demo"] %}
-            <option value="{{ v }}" {% if filters.scan_type == v %}selected{% endif %}>{{ v }}</option>
+            <option value="{{ v }}" {% if filters.scan_type == v %}selected{% endif %}>{{ t('all') if v == 'ALL' else type_t(v) }}</option>
             {% endfor %}
         </select>
         <input type="date" name="date_from" value="{{ filters.date_from }}">
         <input type="date" name="date_to" value="{{ filters.date_to }}">
-        <button type="submit">🔎 Filter</button>
-        <a class="clear-btn" href="/">Clear</a>
+        <button type="submit">{{ t('filter_btn') }}</button>
+        <a class="clear-btn" href="/">{{ t('clear_btn') }}</a>
     </form>
 </div>
 
 <!-- FILE -->
-
-<div
-    id="file-section"
-    class="section-box"
->
-
-<form
-    action="/analyze-file"
-    method="POST"
-    enctype="multipart/form-data"
->
-
-<input
-    type="file"
-    name="file"
-    required
-    style="
-        color:#cbd5e1;
-        margin-bottom:15px;
-    "
->
-
-<br>
-
-<button type="submit">
-    Faylı Hash ilə Analiz Et
-</button>
-
-</form>
-
+<div id="file-section" class="section-box">
+    <form action="/analyze-file" method="POST" enctype="multipart/form-data">
+        <input type="file" name="file" required style="color:#fbfaff;margin-bottom:15px;">
+        <br>
+        <button type="submit">{{ t('file_btn') }}</button>
+    </form>
 </div>
-
 
 <!-- DOMAIN / URL / IP / HASH -->
-
-<div
-    id="domain-section"
-    class="section-box active"
->
-
-<form
-    action="/analyze-domain"
-    method="POST"
->
-
-<input
-    type="text"
-    name="domain"
-    placeholder="URL, domain, IP və ya MD5/SHA1/SHA256 hash daxil edin"
-    required
->
-
-<br>
-
-<button type="submit">
-    CTI Analizini Başlat
-</button>
-
-</form>
-
+<div id="domain-section" class="section-box active">
+    <form action="/analyze-domain" method="POST">
+        <input type="text" name="domain" placeholder="{{ t('domain_ph') }}" required>
+        <br>
+        <button type="submit">{{ t('domain_btn') }}</button>
+    </form>
 </div>
-
 
 {% if result %}
-
 <div class="results">
 
-
 {% if result.incident_id %}
-
 <div class="incident-badge">
-
-<div>
-
-<span
-style="
-font-size:11px;
-color:#a5b4fc;
-text-transform:uppercase;
-font-weight:bold;
-"
->
-Avtomatik İnsident Bilet Generatoru
-</span>
-
-<div
-style="
-font-size:15px;
-color:#fff;
-font-weight:bold;
-margin-top:2px;
-"
->
-
-{{ result.incident_id }}
-
-<span
-style="
-font-size:11px;
-color:#f43f5e;
-background:rgba(244,63,94,0.2);
-padding:2px 6px;
-border-radius:4px;
-margin-left:8px;
-"
->
-SEVERITY:
-{{ result.verdict }}
-</span>
-
+    <div>
+        <span class="lbl">{{ t('incident_gen') }}</span>
+        <div class="id">{{ result.incident_id }}<span class="sev-pill">{{ t('severity') }} {{ verdict_t(result.verdict) }}</span></div>
+    </div>
+    <div>{% for tag in result.tags %}<span class="tag">{{ tag_t(tag) }}</span>{% endfor %}</div>
 </div>
-
-</div>
-
-
-<div>
-
-{% for tag in result.tags %}
-
-<span class="tag">
-{{ tag }}
-</span>
-
-{% endfor %}
-
-</div>
-
-</div>
-
 {% endif %}
 
+<h3>{{ t('report_title') }} <span class="accent">{{ result.target }}</span></h3>
 
-<h3>
+<p><strong>{{ t('ind_type') }}</strong> <span class="violet">{{ type_t(result.indicator_type) }}</span></p>
 
-📊 Truvex Threat Intelligence Hesabatı:
-
-<span style="color:#38bdf8;">
-
-{{ result.target }}
-
-</span>
-
-</h3>
-
-
+{% if result.indicator_type not in ['hash_md5','hash_sha1','hash_sha256'] %}
 <p>
-
-<strong>Indicator Type:</strong>
-
-<span style="color:#c084fc;font-weight:bold;">
-
-{{ result.indicator_type }}
-
-</span>
-
+    <strong>{{ t('server_geo') }}</strong>
+    <span class="accent" style="font-weight:700;">{{ result.geo_flag }} {{ tx(result.geo_country) }}</span>
+    (<code>{{ tx(result.ip) }}</code>)
+    |
+    <strong>{{ t('rdns') }}</strong>
+    <span class="violet">{{ tx(result.resolved_domain) }}</span>
 </p>
-
-
-{% if result.indicator_type not in
-['hash_md5','hash_sha1','hash_sha256'] %}
-
 <p>
-
-<strong>Server IP & Geo-Location:</strong>
-
-<span
-style="
-color:#38bdf8;
-font-weight:bold;
-"
->
-
-{{ result.geo_flag }}
-{{ result.geo_country }}
-
-</span>
-
-(<code>{{ result.ip }}</code>)
-
-|
-
-<strong>Reverse DNS:</strong>
-
-<span style="color:#c084fc;">
-
-{{ result.resolved_domain }}
-
-</span>
-
+    <strong>{{ t('domain_age') }}</strong> {{ tx(result.whois_info) }}
+    |
+    <strong>{{ t('ssl') }}</strong> {{ tx(result.ssl_info) }}
 </p>
-
-
-<p>
-
-<strong>Domen Yaşı:</strong>
-
-{{ result.whois_info }}
-
-|
-
-<strong>SSL:</strong>
-
-{{ result.ssl_info }}
-
-</p>
-
 {% endif %}
 
-
 <p>
-
-<strong>
-Truvex Threat Index (TTI):
-</strong>
-
-
-{% if result.verdict in ["CRITICAL", "HIGH"] %}
-
-<span class="risk-critical">
-
-{{ result.score }} / 100
-
-({{ result.verdict }})
-
-</span>
-
-
-{% elif result.verdict == "MEDIUM" %}
-
-<span
-style="
-color:#fbbf24;
-font-weight:850;
-"
->
-
-{{ result.score }} / 100
-
-(MEDIUM)
-
-</span>
-
-
-{% elif result.verdict == "LOW" %}
-
-<span class="risk-low">
-
-{{ result.score }} / 100
-
-(LOW)
-
-</span>
-
-
-{% else %}
-
-<span class="risk-safe">
-
-{{ result.score }} / 100
-
-(CLEAN)
-
-</span>
-
-{% endif %}
-
+    <strong>{{ t('tti_label') }}</strong>
+    <span class="risk risk-{{ result.verdict|lower }}">{{ result.score }} / 100 ({{ verdict_t(result.verdict) }})</span>
 </p>
-
 
 <!-- DECAY -->
-
+{% if result.decay %}
 <div class="decay-box">
-
-<h4
-style="
-margin:0 0 8px 0;
-color:#38bdf8;
-"
->
-
-📈 Trust-Decay Trajectory
-
-</h4>
-
-
-<p
-style="
-margin:0 0 6px 0;
-font-size:13px;
-color:#cbd5e1;
-"
->
-
-<strong>Trend:</strong>
-
-<span
-style="color:{{ result.decay.color }};"
->
-
-{{ result.decay.trend }}
-
-</span>
-
-</p>
-
-
-<p
-style="
-margin:0;
-font-size:12px;
-color:#94a3b8;
-"
->
-
-{{ result.decay.forecast }}
-
-</p>
-
+    <h4>{{ t('decay_title') }}</h4>
+    <p style="margin:0 0 6px;font-size:13px;"><strong>{{ t('trend') }}</strong>
+        <span style="color:{{ result.decay.color }};font-weight:700;">{{ tx(result.decay.trend) }}</span></p>
+    <p style="margin:0;font-size:12px;color:var(--muted);">{{ tx(result.decay.forecast) }}</p>
 </div>
-
+{% endif %}
 
 <!-- MITRE -->
-
 {% if result.mitre %}
-
+{% set mt = mitre_t(result.mitre) %}
 <div class="mitre-box">
-
-<h4
-style="
-margin:0 0 8px 0;
-color:#c084fc;
-"
->
-
-🎯 MITRE ATT&CK Mapping
-
-</h4>
-
-
-<span
-style="
-background:#7c3aed;
-color:white;
-padding:3px 8px;
-border-radius:4px;
-font-weight:bold;
-font-size:12px;
-"
->
-
-{{ result.mitre.id }}
--
-{{ result.mitre.name }}
-
-</span>
-
-
-<span
-style="
-color:#cbd5e1;
-font-size:13px;
-margin-left:8px;
-"
->
-
-<b>Taktika:</b>
-
-{{ result.mitre.tactic }}
-
-</span>
-
-
-<p
-style="
-margin:8px 0 0 0;
-font-size:12px;
-color:#94a3b8;
-"
->
-
-{{ result.mitre.description }}
-
-</p>
-
+    <h4>{{ t('mitre_title') }}</h4>
+    <span class="mitre-id">{{ mt.id }} - {{ mt.name }}</span>
+    <span style="color:var(--text);font-size:13px;margin-left:8px;"><b>{{ t('tactic') }}</b> {{ mt.tactic }}</span>
+    <p style="margin:8px 0 0;font-size:12px;color:var(--muted);">{{ mt.description }}</p>
 </div>
-
 {% else %}
-
-<div
-style="
-margin-top:20px;
-padding:14px;
-background:#111827;
-border:1px solid #334155;
-border-radius:8px;
-color:#94a3b8;
-font-size:12px;
-"
->
-
-🎯 <strong>MITRE ATT&CK:</strong>
-
-No confirmed technique based on current CTI evidence.
-
-</div>
-
+<div class="info-box">🎯 <strong>MITRE ATT&amp;CK:</strong> {{ t('no_mitre') }}</div>
 {% endif %}
-
 
 <!-- CTI -->
-
-<h4
-style="
-color:#a5b4fc;
-margin-top:25px;
-margin-bottom:10px;
-"
->
-
-🌐 Qlobal CTI Mühərrik Konsensusu
-
-</h4>
-
-
+<h4 class="cti-title">{{ t('cti_consensus') }}</h4>
 <div class="cti-grid">
-
-
-<!-- VT -->
-
+{% for label, key in [('VirusTotal','vt'),('URLhaus','urlhaus'),('AbuseIPDB','abuseipdb'),('AlienVault OTX','otx'),('PhishTank','phishtank'),('OpenPhish','openphish')] %}
+{% set eng = result.cti[key] %}
 <div class="cti-card">
-
-<strong>
-VirusTotal:
-</strong>
-
-<br>
-
-<span
-style="
-color:
-{% if result.cti.vt.status == 'MALICIOUS' %}
-#f43f5e
-{% elif result.cti.vt.status == 'SUSPICIOUS' %}
-#fbbf24
-{% elif result.cti.vt.status in ['CLEAN','NOT_FOUND'] %}
-#10b981
-{% else %}
-#94a3b8
-{% endif %}
-"
->
-
-{{ result.cti.vt.get('positives', 0) }}
-
-/
-
-{{ result.cti.vt.get('total', 0) }}
-
-—
-
-{{ result.cti.vt.status }}
-
-</span>
-
-<br>
-
-<small style="color:#64748b;">
-
-{{ result.cti.vt.detail }}
-
-</small>
-
+    <strong>{{ label }}:</strong><br>
+    <span class="{{ status_cls(eng.status) }}">
+        {% if key == 'vt' %}{{ eng.get('positives', 0) }} / {{ eng.get('total', 0) }} — {% endif %}{{ status_t(eng.status) }}
+    </span><br>
+    <small>{{ tx(eng.detail) }}</small>
 </div>
-
-
-<!-- URLHAUS -->
-
-<div class="cti-card">
-
-<strong>
-URLhaus:
-</strong>
-
-<br>
-
-<span
-style="
-color:
-{% if result.cti.urlhaus.status == 'MALICIOUS' %}
-#f43f5e
-{% elif result.cti.urlhaus.status == 'SUSPICIOUS' %}
-#fbbf24
-{% elif result.cti.urlhaus.status in ['CLEAN','NOT_LISTED'] %}
-#10b981
-{% else %}
-#94a3b8
-{% endif %}
-"
->
-
-{{ result.cti.urlhaus.status }}
-
-</span>
-
-<br>
-
-<small style="color:#64748b;">
-
-{{ result.cti.urlhaus.detail }}
-
-</small>
-
+{% endfor %}
 </div>
-
-
-<!-- ABUSEIPDB -->
-
-<div class="cti-card">
-
-<strong>
-AbuseIPDB:
-</strong>
-
-<br>
-
-<span
-style="
-color:
-{% if result.cti.abuseipdb.status == 'MALICIOUS' %}
-#f43f5e
-{% elif result.cti.abuseipdb.status == 'SUSPICIOUS' %}
-#fbbf24
-{% elif result.cti.abuseipdb.status == 'CLEAN' %}
-#10b981
-{% else %}
-#94a3b8
-{% endif %}
-"
->
-
-{{ result.cti.abuseipdb.status }}
-
-</span>
-
-<br>
-
-<small style="color:#64748b;">
-
-{{ result.cti.abuseipdb.detail }}
-
-</small>
-
-</div>
-
-
-<!-- OTX -->
-
-<div class="cti-card">
-
-<strong>
-AlienVault OTX:
-</strong>
-
-<br>
-
-<span
-style="
-color:
-{% if result.cti.otx.status == 'MALICIOUS' %}
-#f43f5e
-{% elif result.cti.otx.status == 'SUSPICIOUS' %}
-#fbbf24
-{% elif result.cti.otx.status == 'NOT_LISTED' %}
-#10b981
-{% else %}
-#94a3b8
-{% endif %}
-"
->
-
-{{ result.cti.otx.status }}
-
-</span>
-
-<br>
-
-<small style="color:#64748b;">
-
-{{ result.cti.otx.detail }}
-
-</small>
-
-</div>
-
-
-<!-- PHISHTANK -->
-
-<div class="cti-card">
-
-<strong>
-PhishTank:
-</strong>
-
-<br>
-
-<span
-style="
-color:
-{% if result.cti.phishtank.status == 'MALICIOUS' %}
-#f43f5e
-{% elif result.cti.phishtank.status == 'SUSPICIOUS' %}
-#fbbf24
-{% elif result.cti.phishtank.status == 'NOT_LISTED' %}
-#10b981
-{% else %}
-#94a3b8
-{% endif %}
-"
->
-
-{{ result.cti.phishtank.status }}
-
-</span>
-
-<br>
-
-<small style="color:#64748b;">
-
-{{ result.cti.phishtank.detail }}
-
-</small>
-
-</div>
-
-
-<!-- OPENPHISH -->
-
-<div class="cti-card">
-
-<strong>
-OpenPhish:
-</strong>
-
-<br>
-
-<span
-style="
-color:
-{% if result.cti.openphish.status == 'MALICIOUS' %}
-#f43f5e
-{% elif result.cti.openphish.status == 'SUSPICIOUS' %}
-#fbbf24
-{% elif result.cti.openphish.status == 'NOT_LISTED' %}
-#10b981
-{% else %}
-#94a3b8
-{% endif %}
-"
->
-
-{{ result.cti.openphish.status }}
-
-</span>
-
-<br>
-
-<small style="color:#64748b;">
-
-{{ result.cti.openphish.detail }}
-
-</small>
-
-</div>
-
-
-</div>
-
 
 <!-- EVIDENCE -->
-
 {% if result.evidence %}
-
-<div
-style="
-margin-top:20px;
-padding:15px;
-background:#0f172a;
-border:1px solid #334155;
-border-radius:8px;
-"
->
-
-<h4
-style="
-margin-top:0;
-color:#38bdf8;
-"
->
-
-🔎 Risk Evidence
-
-</h4>
-
-<ul
-style="
-color:#94a3b8;
-font-size:12px;
-line-height:1.8;
-"
->
-
-{% for item in result.evidence %}
-
-<li>
-{{ item }}
-</li>
-
-{% endfor %}
-
-</ul>
-
+<div class="evidence-box">
+    <h4>{{ t('risk_evidence') }}</h4>
+    <ul>{% for item in result.evidence %}<li>{{ tx(item) }}</li>{% endfor %}</ul>
 </div>
-
 {% endif %}
-
 
 <!-- AI -->
-
 <div class="ai-report">
-
-<h4
-style="
-margin-top:0;
-color:#818cf8;
-"
->
-
-🤖 Truvex AI-Assisted Triage Prototype
-
-</h4>
-
-<p>
-
-{{ result.ai_analysis | safe }}
-
-</p>
-
+    <h4>{{ t('ai_title') }}</h4>
+    <p>{{ txh(result.ai_analysis) }}</p>
 </div>
 
-
 </div>
-
 {% endif %}
 
-
 <!-- FEED -->
-
 <div class="feed-section">
-
-<h4
-style="
-margin:0 0 15px 0;
-color:#38bdf8;
-font-size:14px;
-text-transform:uppercase;
-"
->
-
-📡 Canlı Telemetriya Lenti
-
-</h4>
-
-
+<h4>{{ t('feed_title') }}</h4>
 {% if feed %}
-
 {% for item in feed %}
-
 <div class="feed-item">
     <div class="feed-main">
-        <span>🎯 <b style="color:#cbd5e1;">{{ item.target }}</b></span>
-        <span>Skor: <b class="score-{{ item.verdict|lower }}">{{ item.score }}/100</b> <small>{{ item.verdict }}</small></span>
+        <span>🎯 <b class="t">{{ item.target }}</b></span>
+        <span>{{ t('score') }} <b class="score-{{ item.verdict|lower }}">{{ item.score }}/100</b> <small>{{ verdict_t(item.verdict) }}</small></span>
     </div>
     <div class="feed-actions">
-        <a class="action-btn" href="/incident/{{ item.id }}">Incident</a>
-        <a class="action-btn" href="/generate-report/{{ item.id }}">PDF</a>
-        <a class="action-btn" href="/export-json/{{ item.id }}">JSON</a>
-        <form method="POST" action="/delete-scan/{{ item.id }}" onsubmit="return confirm('Bu scan tarixçədən silinsin?');">
-            <button class="delete-btn" type="submit">Delete</button>
+        <a class="action-btn" href="/incident/{{ item.id }}">{{ t('btn_incident') }}</a>
+        <a class="action-btn" href="/generate-report/{{ item.id }}">{{ t('btn_pdf') }}</a>
+        <a class="action-btn" href="/export-json/{{ item.id }}">{{ t('btn_json') }}</a>
+        <form method="POST" action="/delete-scan/{{ item.id }}" onsubmit="return confirm({{ t('confirm_delete')|tojson }});">
+            <button class="delete-btn" type="submit">{{ t('btn_delete') }}</button>
         </form>
     </div>
 </div>
-
 {% endfor %}
-
-
 {% else %}
-
-<div
-style="
-text-align:center;
-color:#475569;
-padding:15px;
-font-size:12px;
-"
->
-
-Qeyd yoxdur.
-
-</div>
-
+<div style="text-align:center;color:var(--dim);padding:15px;font-size:12px;">{{ t('no_records') }}</div>
 {% endif %}
-
 </div>
 
-
-<div class="footer">
-
-Truvex CTI v16.0
-&bull;
-Multi-Source IOC Analysis Platform
+<div class="footer">{{ t('footer') }}</div>
 
 </div>
-
-
-</div>
-
 </body>
-
 </html>
 """
+
+
+
+# ============================================================
+# LANGUAGE SWITCH / RESULT VIEW
+# ============================================================
+
+def _default_filters():
+    return {"search": "", "verdict": "ALL", "scan_type": "ALL", "date_from": "", "date_to": ""}
+
+
+@app.route("/set-lang/<code>")
+def set_lang(code):
+    if code not in LANGS:
+        code = DEFAULT_LANG
+    nxt = request.args.get("next", "") or "/"
+    # yalnız daxili yollara icazə (open-redirect qoruması)
+    if not nxt.startswith("/") or nxt.startswith("//") or "\\" in nxt:
+        nxt = "/"
+    resp = redirect(nxt)
+    resp.set_cookie(LANG_COOKIE, code, max_age=60 * 60 * 24 * 365, samesite="Lax")
+    return resp
+
+
+@app.route("/result/<int:scan_id>")
+def view_result(scan_id):
+    scan = get_scan_by_id(scan_id)
+    if not scan or not scan.get("report"):
+        return redirect(url_for("home"))
+    result = dict(scan["report"])
+    result["scan_id"] = scan_id
+    return render_template_string(
+        HTML_TEMPLATE,
+        result=result,
+        feed=get_scans_from_db(limit=50),
+        stats=get_dashboard_stats(),
+        filters=_default_filters()
+    )
 
 
 # ============================================================
@@ -3218,7 +2583,7 @@ def analyze_domain():
 
     if not target:
 
-        return "Indicator daxil edilməyib.", 400
+        return t("err_no_indicator"), 400
 
     indicator_type = detect_indicator_type(
         target
@@ -3448,46 +2813,17 @@ def analyze_domain():
         available_results
     )
 
-    ai_text = f"""
-    Hədəf <b>{target}</b> üçün
-    <b>{indicator_type}</b> tipli IOC analizi aparıldı.
-    """
-
-    ai_text += f"""
-    <br><br>
-    Mövcud CTI mühərrikləri:
-    <b>{available_count}</b>/6.
-    """
-
-    ai_text += f"""
-    <br>
-    Malicious nəticə verən mənbələr:
-    <b>{malicious_votes}</b>.
-    """
-
-    ai_text += f"""
-    <br>
-    Yekun Truvex Threat Index:
-    <b>{score}/100 ({verdict})</b>.
-    """
+    ai_text = M("ai_dom_1", type=indicator_type, target=target)
+    ai_text += M("ai_dom_2", n=available_count)
+    ai_text += M("ai_dom_3", m=malicious_votes)
+    ai_text += M("ai_dom_4", score=score, verdict=verdict)
 
     if evidence:
-
-        ai_text += (
-            "<br><br><b>Risk evidence:</b><br>"
-            + "<br>".join(
-                f"• {x}"
-                for x in evidence
-            )
-        )
-
+        ai_text += M("ai_ev_head") + "<br>".join("• " + x for x in evidence)
     else:
+        ai_text += M("ai_ev_none")
 
-        ai_text += (
-            "<br><br>"
-            "Mövcud mənbələrdə əhəmiyyətli "
-            "malicious evidence aşkar edilmədi."
-        )
+
 
 
     # --------------------------------------------------------
@@ -3550,15 +2886,7 @@ def analyze_domain():
     result["scan_id"] = scan_id
     update_report_json(scan_id, result)
 
-    feed = get_scans_from_db(limit=50)
-
-    return render_template_string(
-        HTML_TEMPLATE,
-        result=result,
-        feed=feed,
-        stats=get_dashboard_stats(),
-        filters={"search":"", "verdict":"ALL", "scan_type":"ALL", "date_from":"", "date_to":""}
-    )
+    return redirect(url_for("view_result", scan_id=scan_id))
 
 
 # ============================================================
@@ -3573,7 +2901,7 @@ def analyze_file():
 
     if "file" not in request.files:
 
-        return "Fayl yoxdur.", 400
+        return t("err_no_file"), 400
 
 
     file = request.files["file"]
@@ -3585,7 +2913,7 @@ def analyze_file():
 
     if not file_bytes:
 
-        return "Fayl boşdur.", 400
+        return t("err_empty_file"), 400
 
 
     # --------------------------------------------------------
@@ -3626,35 +2954,35 @@ def analyze_file():
             "available": False,
             "status": "SKIPPED",
             "malicious": False,
-            "detail": "Fayl üçün tətbiq edilmir."
+            "detail": M("na_file")
         },
 
         "abuseipdb": {
             "available": False,
             "status": "SKIPPED",
             "malicious": False,
-            "detail": "Fayl üçün tətbiq edilmir."
+            "detail": M("na_file")
         },
 
         "otx": {
             "available": False,
             "status": "SKIPPED",
             "malicious": False,
-            "detail": "Fayl üçün tətbiq edilmir."
+            "detail": M("na_file")
         },
 
         "phishtank": {
             "available": False,
             "status": "SKIPPED",
             "malicious": False,
-            "detail": "Fayl üçün tətbiq edilmir."
+            "detail": M("na_file")
         },
 
         "openphish": {
             "available": False,
             "status": "SKIPPED",
             "malicious": False,
-            "detail": "Fayl üçün tətbiq edilmir."
+            "detail": M("na_file")
         }
 
     }
@@ -3725,39 +3053,10 @@ def analyze_file():
     # AI
     # --------------------------------------------------------
 
-    ai_text = f"""
-    Fayl <b>{filename}</b> üçün statik hash analizi aparıldı.
-    """
+    ai_text = M("ai_file_1", filename=filename)
+    ai_text += M("ai_file_2", md5=md5, sha1=sha1, sha256=sha256)
+    ai_text += M("ai_file_3", vt=vt_res.get("status"), score=score, verdict=verdict)
 
-    ai_text += f"""
-    <br><br>
-    MD5:
-    <code>{md5}</code>
-    """
-
-    ai_text += f"""
-    <br>
-    SHA1:
-    <code>{sha1}</code>
-    """
-
-    ai_text += f"""
-    <br>
-    SHA256:
-    <code>{sha256}</code>
-    """
-
-    ai_text += f"""
-    <br><br>
-    VirusTotal nəticəsi:
-    <b>{vt_res.get("status")}</b>.
-    """
-
-    ai_text += f"""
-    <br>
-    TTI:
-    <b>{score}/100 ({verdict})</b>.
-    """
 
 
     result = {
@@ -3781,7 +3080,7 @@ def analyze_file():
 
         "resolved_domain": "N/A",
 
-        "geo_country": "Local File Analysis",
+        "geo_country": M("geo_file"),
 
         "geo_flag": "📁",
 
@@ -3815,15 +3114,7 @@ def analyze_file():
     result["scan_id"] = scan_id
     update_report_json(scan_id, result)
 
-    feed = get_scans_from_db(limit=50)
-
-    return render_template_string(
-        HTML_TEMPLATE,
-        result=result,
-        feed=feed,
-        stats=get_dashboard_stats(),
-        filters={"search":"", "verdict":"ALL", "scan_type":"ALL", "date_from":"", "date_to":""}
-    )
+    return redirect(url_for("view_result", scan_id=scan_id))
 
 
 
@@ -3841,7 +3132,7 @@ def delete_scan(scan_id):
 def incident_detail(scan_id):
     scan = get_scan_by_id(scan_id)
     if not scan:
-        return "Scan tapılmadı.", 404
+        return t("err_scan_nf"), 404
 
     if request.method == "POST":
         notes = request.form.get("analyst_notes", "")
@@ -3860,7 +3151,7 @@ def incident_detail(scan_id):
             "evidence": [],
             "cti": {},
             "mitre": None,
-            "ai_analysis": "Tarixi scan üçün saxlanılmış geniş report məlumatı yoxdur."
+            "ai_analysis": M("ai_legacy")
         }
 
     cti_rows = []
@@ -3870,22 +3161,23 @@ def incident_detail(scan_id):
         cti_rows.append((name.upper(), data.get("status", "N/A"), data.get("detail", "")))
 
     html = """
-    <!DOCTYPE html><html lang="az"><head><meta charset="UTF-8"><title>TRUVEX Incident</title>
-    <style>body{font-family:Segoe UI,Tahoma,sans-serif;background:#07090e;color:#f8fafc;margin:0;padding:30px}.wrap{max-width:1100px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px}.back{color:#38bdf8;text-decoration:none}.box{background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:18px;margin-bottom:15px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.card{background:#07090e;border:1px solid #1e293b;border-radius:8px;padding:12px}.label{color:#64748b;font-size:10px;text-transform:uppercase}.value{color:#e2e8f0;margin-top:5px;word-break:break-word}.critical{color:#f43f5e}.high{color:#fb7185}.medium{color:#fbbf24}.low{color:#f59e0b}.clean{color:#10b981}.tag{display:inline-block;border:1px solid #334155;padding:4px 7px;border-radius:5px;color:#94a3b8;font-size:10px;margin:3px}.cti{width:100%;border-collapse:collapse}.cti th,.cti td{border-bottom:1px solid #1e293b;padding:8px;text-align:left;font-size:11px}.cti th{color:#38bdf8}.notes{width:100%;box-sizing:border-box;min-height:140px;background:#07090e;border:1px solid #334155;border-radius:8px;color:#cbd5e1;padding:10px}.btn{background:#111827;color:#cbd5e1;border:1px solid #334155;border-radius:6px;padding:8px 12px;cursor:pointer}.btn.blue{border-color:#38bdf8;color:#38bdf8}@media(max-width:800px){.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap">
-    <div class="top"><h2>🛡️ TRUVEX Incident Details</h2><a class="back" href="/">← Dashboard</a></div>
-    <div class="box"><div class="grid">
-    <div class="card"><div class="label">Indicator</div><div class="value">{{ report.get('target','N/A') }}</div></div>
-    <div class="card"><div class="label">Type</div><div class="value">{{ report.get('indicator_type', scan.type) }}</div></div>
-    <div class="card"><div class="label">TTI</div><div class="value {{ report.get('verdict','CLEAN')|lower }}">{{ report.get('score',scan.score) }}/100 — {{ report.get('verdict','CLEAN') }}</div></div>
-    <div class="card"><div class="label">Incident ID</div><div class="value">{{ report.get('incident_id') or 'No incident' }}</div></div>
-    <div class="card"><div class="label">Created</div><div class="value">{{ scan.timestamp }}</div></div>
-    <div class="card"><div class="label">MITRE ATT&CK</div><div class="value">{% if report.get('mitre') %}{{ report.mitre.id }} — {{ report.mitre.name }}{% else %}N/A{% endif %}</div></div>
+    <!DOCTYPE html><html lang="{{ lang }}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{ t('inc_title') }}</title>
+    <style>{{ app_css }}</style></head><body><div class="page">
+    <div class="top-bar"><h2>{{ t('inc_title') }}</h2>{{ lang_switch }}</div>
+    <p><a class="back" href="/">{{ t('inc_back') }}</a></p>
+    <div class="ibox"><div class="igrid">
+    <div class="icard"><div class="ilabel">{{ t('inc_indicator') }}</div><div class="ivalue">{{ report.get('target','N/A') }}</div></div>
+    <div class="icard"><div class="ilabel">{{ t('inc_type') }}</div><div class="ivalue">{{ type_t(report.get('indicator_type', scan.type)) }}</div></div>
+    <div class="icard"><div class="ilabel">TTI</div><div class="ivalue {{ report.get('verdict','CLEAN')|lower }}">{{ report.get('score',scan.score) }}/100 — {{ verdict_t(report.get('verdict','CLEAN')) }}</div></div>
+    <div class="icard"><div class="ilabel">{{ t('inc_id') }}</div><div class="ivalue">{{ report.get('incident_id') or t('inc_none') }}</div></div>
+    <div class="icard"><div class="ilabel">{{ t('inc_created') }}</div><div class="ivalue">{{ scan.timestamp }}</div></div>
+    <div class="icard"><div class="ilabel">MITRE ATT&amp;CK</div><div class="ivalue">{% if report.get('mitre') %}{% set mt = mitre_t(report.mitre) %}{{ mt.id }} — {{ mt.name }}{% else %}N/A{% endif %}</div></div>
     </div></div>
-    <div class="box"><h3>CTI Evidence</h3><table class="cti"><tr><th>Engine</th><th>Status</th><th>Detail</th></tr>{% for name,status,detail in cti_rows %}<tr><td>{{ name }}</td><td>{{ status }}</td><td>{{ detail }}</td></tr>{% else %}<tr><td colspan="3">CTI report data yoxdur.</td></tr>{% endfor %}</table></div>
-    <div class="box"><h3>Risk Evidence</h3>{% for e in report.get('evidence',[]) %}<div class="tag">{{ e }}</div>{% else %}<div class="value">No evidence recorded.</div>{% endfor %}</div>
-    <div class="box"><h3>AI-Assisted Triage</h3><div class="value">{{ report.get('ai_analysis','N/A')|safe }}</div></div>
-    <div class="box"><h3>Analyst Notes</h3><form method="POST"><textarea class="notes" name="analyst_notes" placeholder="Analyst note...">{{ scan.analyst_notes }}</textarea><br><br><button class="btn blue" type="submit">Save Notes</button></form></div>
-    <div><a class="btn" href="/generate-report/{{ scan.id }}">PDF Report</a> <a class="btn" href="/export-json/{{ scan.id }}">Export JSON</a></div>
+    <div class="ibox"><h3>{{ t('inc_cti_ev') }}</h3><table class="ctitable"><tr><th>{{ t('inc_engine') }}</th><th>{{ t('inc_status') }}</th><th>{{ t('inc_detail') }}</th></tr>{% for name,status,detail in cti_rows %}<tr><td>{{ name }}</td><td class="{{ status_cls(status) }}">{{ status_t(status) }}</td><td>{{ tx(detail) }}</td></tr>{% else %}<tr><td colspan="3">{{ t('inc_no_cti') }}</td></tr>{% endfor %}</table></div>
+    <div class="ibox"><h3>{{ t('risk_evidence') }}</h3>{% for e in report.get('evidence',[]) %}<span class="tag">{{ tx(e) }}</span>{% else %}<div class="ivalue">{{ t('inc_no_ev') }}</div>{% endfor %}</div>
+    <div class="ibox"><h3>{{ t('ai_title') }}</h3><div class="ivalue">{{ txh(report.get('ai_analysis','N/A')) }}</div></div>
+    <div class="ibox"><h3>{{ t('inc_notes') }}</h3><form method="POST"><textarea class="notes" name="analyst_notes" placeholder="{{ t('inc_notes_ph') }}">{{ scan.analyst_notes }}</textarea><br><br><button class="btn blue" type="submit">{{ t('inc_save') }}</button></form></div>
+    <div><a class="btn" href="/generate-report/{{ scan.id }}">{{ t('inc_pdf') }}</a> <a class="btn" href="/export-json/{{ scan.id }}">{{ t('inc_json') }}</a></div>
     </div></body></html>
     """
 
@@ -3896,71 +3188,132 @@ def incident_detail(scan_id):
 # REPORTING / EXPORT
 # ============================================================
 
+_PDF_FONTS = None
+_AZ_TRANSLIT = str.maketrans({
+    "ə": "e", "Ə": "E", "ı": "i", "İ": "I", "ş": "s", "Ş": "S", "ğ": "g", "Ğ": "G",
+    "ç": "c", "Ç": "C", "ö": "o", "Ö": "O", "ü": "u", "Ü": "U", "≥": ">=", "→": "->", "←": "<-"
+})
+
+
+def _pdf_fonts():
+    """Azərbaycan hərfləri (ə, ş, ğ, ı...) üçün Unicode TTF şrift tapır."""
+    global _PDF_FONTS
+    if _PDF_FONTS:
+        return _PDF_FONTS
+
+    candidates = []
+    if os.getenv("TRUVEX_PDF_FONT") and os.getenv("TRUVEX_PDF_FONT_BOLD"):
+        candidates.append((os.getenv("TRUVEX_PDF_FONT"), os.getenv("TRUVEX_PDF_FONT_BOLD")))
+    candidates += [
+        ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+        ("C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/segoeuib.ttf"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        ("/Library/Fonts/Arial.ttf", "/Library/Fonts/Arial Bold.ttf"),
+        ("/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+    ]
+    for reg, bold in candidates:
+        if os.path.exists(reg) and os.path.exists(bold):
+            try:
+                pdfmetrics.registerFont(TTFont("TruvexSans", reg))
+                pdfmetrics.registerFont(TTFont("TruvexSans-Bold", bold))
+                _PDF_FONTS = ("TruvexSans", "TruvexSans-Bold", True)
+                return _PDF_FONTS
+            except Exception:
+                continue
+
+    _PDF_FONTS = ("Helvetica", "Helvetica-Bold", False)
+    return _PDF_FONTS
+
+
 def build_pdf_report(scan):
     report = scan.get("report") or {}
+    reg, bold, unicode_ok = _pdf_fonts()
+
+    def C(value):
+        """Mətni cari dilə çevirir; Unicode şrift yoxdursa ASCII-yə yaxınlaşdırır."""
+        text = str(tx(value))
+        return text if unicode_ok else text.translate(_AZ_TRANSLIT)
+
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
-    title = ParagraphStyle("TruvexTitle", parent=styles["Title"], alignment=TA_CENTER, fontSize=18, spaceAfter=16)
-    h = ParagraphStyle("TruvexH", parent=styles["Heading2"], fontSize=12, spaceBefore=10, spaceAfter=7)
-    body = ParagraphStyle("TruvexBody", parent=styles["BodyText"], fontSize=9, leading=13)
+    title = ParagraphStyle("TruvexTitle", parent=styles["Title"], alignment=TA_CENTER, fontName=bold, fontSize=18, spaceAfter=16, textColor=colors.HexColor("#5b21b6"))
+    h = ParagraphStyle("TruvexH", parent=styles["Heading2"], fontName=bold, fontSize=12, spaceBefore=10, spaceAfter=7, textColor=colors.HexColor("#0891b2"))
+    body = ParagraphStyle("TruvexBody", parent=styles["BodyText"], fontName=reg, fontSize=9, leading=13)
+    cell = ParagraphStyle("TruvexCell", parent=body, fontSize=7, leading=9)
 
-    story = [Paragraph("TRUVEX CTI INCIDENT REPORT", title)]
-    story.append(Paragraph(f"Generated: {escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}", body))
+    verdict = str(report.get("verdict", "N/A"))
+    story = [Paragraph(escape(t("pdf_title") if unicode_ok else C(t("pdf_title"))), title)]
+    story.append(Paragraph(f"{escape(C(t('pdf_generated')))}: {escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}", body))
     story.append(Spacer(1, 10))
 
     summary = [
-        ["Indicator", str(report.get("target", scan["target"]))],
-        ["Indicator Type", str(report.get("indicator_type", scan["type"]))],
+        [C(t("inc_indicator")), C(report.get("target", scan["target"]))],
+        [C(t("ind_type")).rstrip(":"), C(type_t(report.get("indicator_type", scan["type"])))],
         ["TTI", f"{report.get('score', scan['score'])}/100"],
-        ["Verdict", str(report.get("verdict", "N/A"))],
-        ["Incident ID", str(report.get("incident_id") or "N/A")],
-        ["Timestamp", str(scan.get("timestamp", "N/A"))],
+        [C(t("pdf_verdict")), C(verdict_t(verdict)) if verdict != "N/A" else "N/A"],
+        [C(t("inc_id")), C(report.get("incident_id") or "N/A")],
+        [C(t("pdf_timestamp")), str(scan.get("timestamp", "N/A"))],
     ]
-    t = Table(summary, colWidths=[110, 395])
-    t.setStyle(TableStyle([("BACKGROUND", (0,0),(0,-1), colors.HexColor("#e2e8f0")), ("GRID",(0,0),(-1,-1),0.5,colors.grey), ("VALIGN",(0,0),(-1,-1),"TOP"), ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"), ("FONTSIZE",(0,0),(-1,-1),8)]))
-    story += [t, Spacer(1, 12)]
+    tbl = Table(summary, colWidths=[110, 395])
+    tbl.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), reg), ("FONTNAME", (0, 0), (0, -1), bold),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#ede9fe")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#a78bfa")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTSIZE", (0, 0), (-1, -1), 8)]))
+    story += [tbl, Spacer(1, 12)]
 
-    story.append(Paragraph("Risk Evidence", h))
+    story.append(Paragraph(escape(C(t("risk_evidence")).replace("🔎", "").strip()), h))
     evidence = report.get("evidence") or []
     if evidence:
         for item in evidence:
-            story.append(Paragraph("• " + escape(str(item)), body))
+            story.append(Paragraph("• " + escape(C(item)), body))
     else:
-        story.append(Paragraph("No recorded malicious evidence.", body))
+        story.append(Paragraph(escape(C(t("pdf_no_ev"))), body))
 
-    story.append(Paragraph("CTI Sources", h))
-    cti_rows = [["Engine", "Status", "Detail"]]
+    story.append(Paragraph(escape(C(t("pdf_cti_sources"))), h))
+    cti_rows = [[C(t("inc_engine")), C(t("inc_status")), C(t("inc_detail"))]]
     for name, data in (report.get("cti") or {}).items():
         if isinstance(data, dict):
-            cti_rows.append([str(name), str(data.get("status", "N/A")), str(data.get("detail", ""))])
-    ct = Table(cti_rows, colWidths=[100, 85, 320], repeatRows=1)
-    ct.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#1e293b")), ("TEXTCOLOR",(0,0),(-1,0),colors.white), ("GRID",(0,0),(-1,-1),0.35,colors.grey), ("VALIGN",(0,0),(-1,-1),"TOP"), ("FONTSIZE",(0,0),(-1,-1),7)]))
+            cti_rows.append([
+                str(name).upper(),
+                C(status_t(data.get("status", "N/A"))),
+                Paragraph(escape(C(data.get("detail", ""))), cell),
+            ])
+    ct = Table(cti_rows, colWidths=[100, 95, 310], repeatRows=1)
+    ct.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), reg), ("FONTNAME", (0, 0), (-1, 0), bold),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#5b21b6")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#a78bfa")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTSIZE", (0, 0), (-1, -1), 7)]))
     story += [ct, Spacer(1, 12)]
 
-    story.append(Paragraph("MITRE ATT&CK", h))
-    mitre = report.get("mitre")
+    story.append(Paragraph("MITRE ATT&amp;CK", h))
+    mitre = mitre_t(report.get("mitre"))
     if mitre:
-        story.append(Paragraph(escape(f"{mitre.get('id','N/A')} — {mitre.get('name','N/A')} | {mitre.get('tactic','N/A')}"), body))
-        story.append(Paragraph(escape(str(mitre.get("description", ""))), body))
+        story.append(Paragraph(escape(C(f"{mitre.get('id','N/A')} — {mitre.get('name','N/A')} | {mitre.get('tactic','N/A')}")), body))
+        story.append(Paragraph(escape(C(mitre.get("description", ""))), body))
     else:
-        story.append(Paragraph("No MITRE mapping recorded.", body))
+        story.append(Paragraph(escape(C(t("pdf_no_mitre"))), body))
 
-    story.append(Paragraph("Network / Context", h))
+    story.append(Paragraph(escape(C(t("pdf_context"))), h))
     context = [
-        ["IP", str(report.get("ip", "N/A"))],
-        ["Country", str(report.get("geo_country", "N/A"))],
-        ["Resolved Domain", str(report.get("resolved_domain", "N/A"))],
-        ["WHOIS", str(report.get("whois_info", "N/A"))],
-        ["SSL", str(report.get("ssl_info", "N/A"))],
+        [C(t("pdf_ip")), C(report.get("ip", "N/A"))],
+        [C(t("pdf_country")), C(report.get("geo_country", "N/A"))],
+        [C(t("pdf_resolved")), C(report.get("resolved_domain", "N/A"))],
+        [C(t("pdf_whois")), C(report.get("whois_info", "N/A"))],
+        ["SSL", C(report.get("ssl_info", "N/A"))],
     ]
-    nt = Table(context, colWidths=[110,395])
-    nt.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.35,colors.grey), ("FONTNAME",(0,0),(0,-1),"Helvetica-Bold"), ("FONTSIZE",(0,0),(-1,-1),8), ("VALIGN",(0,0),(-1,-1),"TOP")]))
+    nt = Table(context, colWidths=[110, 395])
+    nt.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), reg), ("FONTNAME", (0, 0), (0, -1), bold),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#a78bfa")),
+        ("FONTSIZE", (0, 0), (-1, -1), 8), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
     story += [nt, Spacer(1, 12)]
 
-    story.append(Paragraph("Analyst Notes", h))
-    story.append(Paragraph(escape(scan.get("analyst_notes") or "No analyst notes."), body))
-
+    story.append(Paragraph(escape(C(t("inc_notes"))), h))
+    story.append(Paragraph(escape(C(scan.get("analyst_notes") or t("pdf_no_notes"))), body))
     doc.build(story)
     buffer.seek(0)
     return buffer
@@ -3970,7 +3323,7 @@ def build_pdf_report(scan):
 def generate_report(scan_id):
     scan = get_scan_by_id(scan_id)
     if not scan or not scan.get("report"):
-        return "Bu scan üçün report məlumatı mövcud deyil.", 404
+        return t("err_no_report"), 404
     pdf = build_pdf_report(scan)
     filename = f"truvex_report_{scan_id}.pdf"
     return send_file(pdf, mimetype="application/pdf", as_attachment=True, download_name=filename)
@@ -3980,7 +3333,7 @@ def generate_report(scan_id):
 def export_json(scan_id):
     scan = get_scan_by_id(scan_id)
     if not scan:
-        return "Scan tapılmadı.", 404
+        return t("err_scan_nf"), 404
     payload = {
         "scan_id": scan["id"],
         "target": scan["target"],
@@ -3990,7 +3343,7 @@ def export_json(scan_id):
         "timestamp": scan["timestamp"],
         "tags": scan["tags"],
         "analyst_notes": scan["analyst_notes"],
-        "report": scan["report"]
+        "report": tx_deep(scan["report"])
     }
     data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     return send_file(BytesIO(data), mimetype="application/json", as_attachment=True, download_name=f"truvex_scan_{scan_id}.json")
@@ -4050,7 +3403,7 @@ def api_health():
 @app.route("/engine-status")
 def engine_status():
     status = get_engine_status()
-    html = """<!DOCTYPE html><html lang="az"><head><meta charset="UTF-8"><title>TRUVEX Engine Health</title><style>body{font-family:Segoe UI;background:#07090e;color:#f8fafc;padding:30px}.wrap{max-width:850px;margin:auto}.box{background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:16px;margin:8px 0;display:flex;justify-content:space-between}.ok{color:#10b981}.off{color:#fbbf24}.back{color:#38bdf8}</style></head><body><div class="wrap"><a class="back" href="/">← Dashboard</a><h2>⚙️ CTI Engine Health</h2>{% for name,ok in status.items() %}<div class="box"><span>{{ name }}</span><b class="{{ 'ok' if ok else 'off' }}">{{ 'CONFIGURED / READY' if ok else 'NOT CONFIGURED' }}</b></div>{% endfor %}</div></body></html>"""
+    html = """<!DOCTYPE html><html lang="{{ lang }}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{ t('eh_title') }}</title><style>{{ app_css }}</style></head><body><div class="page" style="max-width:850px"><div class="top-bar"><h2>{{ t('eh_head') }}</h2>{{ lang_switch }}</div><p><a class="back" href="/">{{ t('inc_back') }}</a></p>{% for name,ok in status.items() %}<div class="engine-row"><span>{{ name }}</span><b class="{{ 'ok' if ok else 'off' }}">{{ t('eh_ready') if ok else t('eh_not') }}</b></div>{% endfor %}</div></body></html>"""
     return render_template_string(html, status=status)
 
 
@@ -4062,12 +3415,12 @@ def engine_status():
 def demo_mode():
     target = "login-security-demo.example"
     cti = {
-        "vt": {"engine":"VirusTotal","available":True,"malicious":True,"status":"MALICIOUS","positives":8,"suspicious":1,"total":70,"detail":"Demo detection: 8/70"},
-        "urlhaus": {"engine":"URLhaus","available":True,"malicious":True,"status":"MALICIOUS","detail":"Demo malicious URL"},
-        "abuseipdb": {"engine":"AbuseIPDB","available":True,"malicious":False,"status":"CLEAN","confidence":0,"detail":"Demo"},
-        "otx": {"engine":"AlienVault OTX","available":True,"malicious":True,"status":"MALICIOUS","pulses":4,"detail":"Demo threat pulses: 4"},
-        "phishtank": {"engine":"PhishTank","available":True,"malicious":True,"status":"MALICIOUS","detail":"Demo verified phishing"},
-        "openphish": {"engine":"OpenPhish","available":True,"malicious":True,"status":"MALICIOUS","detail":"Demo malicious URL"}
+        "vt": {"engine":"VirusTotal","available":True,"malicious":True,"status":"MALICIOUS","positives":8,"suspicious":1,"total":70,"detail":M("demo_vt", p=8, t=70)},
+        "urlhaus": {"engine":"URLhaus","available":True,"malicious":True,"status":"MALICIOUS","detail":M("demo_url")},
+        "abuseipdb": {"engine":"AbuseIPDB","available":True,"malicious":False,"status":"CLEAN","confidence":0,"detail":M("demo_plain")},
+        "otx": {"engine":"AlienVault OTX","available":True,"malicious":True,"status":"MALICIOUS","pulses":4,"detail":M("demo_pulses", n=4)},
+        "phishtank": {"engine":"PhishTank","available":True,"malicious":True,"status":"MALICIOUS","detail":M("demo_phish")},
+        "openphish": {"engine":"OpenPhish","available":True,"malicious":True,"status":"MALICIOUS","detail":M("demo_url")}
     }
     score, verdict, evidence = calculate_tti(cti)
     incident_id = f"INC-DEMO-{random.randint(100,999)}"
@@ -4085,16 +3438,16 @@ def demo_mode():
         "incident_id": incident_id,
         "tags": tags,
         "mitre": MITRE_ATTACK_MAPPING["phishing"],
-        "whois_info": "Demo data — not a real WHOIS lookup",
-        "ssl_info": "Demo SSL context",
+        "whois_info": M("demo_whois"),
+        "ssl_info": M("demo_ssl"),
         "cti": cti,
         "evidence": evidence,
-        "ai_analysis": "<b>Demo mode:</b> This report is synthetic and is intended only for presentation/testing."
+        "ai_analysis": M("ai_demo")
     }
     scan_id = save_scan_to_db(target, "demo", score, incident_id, tags, report_data=result)
     result["scan_id"] = scan_id
     update_report_json(scan_id, result)
-    return render_template_string(HTML_TEMPLATE, result=result, feed=get_scans_from_db(limit=50), stats=get_dashboard_stats(), filters={"search":"", "verdict":"ALL", "scan_type":"ALL", "date_from":"", "date_to":""})
+    return redirect(url_for("view_result", scan_id=scan_id))
 
 
 # ============================================================
