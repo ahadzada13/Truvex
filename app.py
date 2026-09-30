@@ -61,10 +61,10 @@ OPENPHISH_FEED_URL = "https://openphish.com/feed.txt"
 # ============================================================
 APP_CSS = """
 :root{
-  --bg:#eef1f4; --panel:#ffffff; --panel2:#e4e9ee; --panel3:#f7f8fa;
-  --border:#b8c2cc; --text:#26323d; --muted:#657482; --dim:#8a98a5;
-  --cyan:#2f6078; --blue:#3b6f8f; --violet:#6f7d88; --pink:#526c7c;
-  --crit:#b83d4d; --high:#b96820; --med:#9a7618; --low:#3f7894; --ok:#347653;
+  --bg:#f3f5f7; --panel:#ffffff; --panel2:#e9edf1; --panel3:#f8fafb;
+  --border:#c4ccd4; --text:#202a33; --muted:#5d6b78; --dim:#87939e;
+  --cyan:#236b82; --blue:#315f7a; --violet:#596b78; --pink:#6b5d70;
+  --crit:#b13d4b; --high:#ad681f; --med:#927317; --low:#36738d; --ok:#32734f;
 }
 *{box-sizing:border-box}
 body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;color:var(--text);margin:0;padding:30px;
@@ -170,6 +170,26 @@ button[type="submit"]:hover{transform:translateY(-2px)}
 .engine-row{display:flex;justify-content:space-between;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin:8px 0}
 .engine-row .ok{color:var(--ok);font-weight:800}.engine-row .off{color:var(--med);font-weight:800}
 @media(max-width:900px){body{padding:12px}.container{padding:20px}.dashboard-grid{grid-template-columns:repeat(3,1fr)}.analytics-box,.cti-grid,.igrid{grid-template-columns:1fr}.feed-item{flex-direction:column;align-items:stretch}.feed-main{flex-direction:column;align-items:flex-start}}
+@media(prefers-color-scheme:dark){
+  :root{
+    --bg:#11161b; --panel:#1a2128; --panel2:#222b34; --panel3:#151c22;
+    --border:#394652; --text:#e7edf2; --muted:#a5b1bb; --dim:#74818c;
+    --cyan:#63b6cf; --blue:#6d9fbd; --violet:#9aaab6; --pink:#b39ab6;
+    --crit:#e36b78; --high:#df944c; --med:#d4b94f; --low:#68afd0; --ok:#68b88a;
+  }
+  body{background:var(--bg)}
+  .container{box-shadow:0 10px 30px rgba(0,0,0,.30),0 0 0 1px var(--border)}
+  .tab-btn:hover{color:var(--text);background:var(--cyan)}
+  .risk-critical{background:#352126;border-color:#713740}
+  .risk-high{background:#382b1e;border-color:#76522f}
+  .risk-medium{background:#36311d;border-color:#70622d}
+  .risk-low{background:#1e3039;border-color:#3e6678}
+  .risk-clean{background:#1d3027;border-color:#3d6d51}
+  .sev-pill{background:#352126;border-color:#713740}
+  .evidence-box{background:#36311d;border-color:#70622d}
+  .ai-report code{background:#2d3740;color:var(--cyan)}
+}
+
 """
 
 
